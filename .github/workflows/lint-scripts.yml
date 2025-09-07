@@ -1,119 +1,29 @@
-import os
-import re
-import sys
-import subprocess
-from github import Github
+name: Lint Scripts (synopsis required)
 
-def find_files():
-    """Find all script files to lint."""
-    scripts = []
-    for root, _, files in os.walk("."):
-        for file in files:
-            if file.endswith((".sh", ".py", ".bash")):
-                scripts.append(os.path.join(root, file))
-    return scripts
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch: {}
 
-def check_synopsis_block(content):
-    """Check for .SYNOPSIS block in the script content."""
-    synopsis_pattern = re.compile(r"\.SYNOPSIS", re.IGNORECASE)
-    return bool(synopsis_pattern.search(content))
+permissions:
+  contents: read
+  issues: write
 
-def check_bash_comments(content):
-    """Check that bash scripts have proper comment blocks."""
-    # For simplicity, check that the first non-blank line is a comment
-    lines = content.strip().splitlines()
-    for line in lines:
-        if line.strip():
-            return line.strip().startswith("#")
-    return False
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-def check_python_docstring(content):
-    """Check for Python docstring at the top of the file."""
-    docstring_pattern = re.compile(r'^\s*(?P<quote>"""|\'\'\')(.*?)(?P=quote)', re.DOTALL)
-    return bool(docstring_pattern.match(content))
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
 
-def lint_script(path):
-    """Lint a single script file."""
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    errors = []
-
-    if path.endswith((".sh", ".bash")):
-        if not check_synopsis_block(content):
-            errors.append(".SYNOPSIS block missing")
-        if not check_bash_comments(content):
-            errors.append("No bash comment block at the start")
-    elif path.endswith(".py"):
-        if not check_python_docstring(content):
-            errors.append("Missing Python docstring at the top")
-        if not check_synopsis_block(content):
-            errors.append(".SYNOPSIS block missing")
-    else:
-        # Unknown file type, skip
-        pass
-
-    return errors
-
-def create_or_update_issue(failures):
-    """Create or update a GitHub issue with the lint failures."""
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        print("GITHUB_TOKEN environment variable not set. Skipping issue creation.")
-        return
-
-    repo_name = os.getenv("GITHUB_REPOSITORY")
-    if not repo_name:
-        print("GITHUB_REPOSITORY environment variable not set. Skipping issue creation.")
-        return
-
-    g = Github(token)
-    repo = g.get_repo(repo_name)
-
-    title = "Lint Scripts: Missing Synopsis or Docstrings"
-    body_lines = [
-        "The following scripts failed the synopsis/docstring lint checks:\n"
-    ]
-    for path, errors in failures.items():
-        link = f"https://github.com/{repo_name}/blob/main/{path}"
-        body_lines.append(f"- [{path}]({link}):")
-        for error in errors:
-            body_lines.append(f"  - {error}")
-        body_lines.append("")
-
-    body = "\n".join(body_lines)
-
-    # Check if issue already exists
-    issues = repo.get_issues(state="open")
-    existing_issue = None
-    for issue in issues:
-        if issue.title == title:
-            existing_issue = issue
-            break
-
-    labels = ["lint", "synopsis"]
-
-    if existing_issue:
-        existing_issue.edit(body=body, labels=labels)
-        print(f"Updated existing issue #{existing_issue.number}")
-    else:
-        new_issue = repo.create_issue(title=title, body=body, labels=labels)
-        print(f"Created new issue #{new_issue.number}")
-
-def main():
-    scripts = find_files()
-    failures = {}
-
-    for script in scripts:
-        errors = lint_script(script)
-        if errors:
-            failures[script] = errors
-
-    if failures:
-        create_or_update_issue(failures)
-        sys.exit(1)
-    else:
-        print("All scripts passed lint checks.")
-
-if __name__ == "__main__":
-    main()
+      - name: Run synopsis linter
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 tools/lint_scripts.py
