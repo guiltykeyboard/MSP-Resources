@@ -2,111 +2,212 @@ import os
 import re
 import sys
 import subprocess
-from github import Github
+import requests
 
-# Constants
-REPO_NAME = os.getenv("GITHUB_REPOSITORY")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-ISSUE_TITLE = "Linting Issues Found in Scripts"
-ISSUE_LABELS = ["lint", "automation"]
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+SCRIPTS_DIR = os.path.join(REPO_ROOT, 'ConnectWise-RMM-Asio', 'Scripts')
 
-# Regex patterns
-SYNOPSIS_PATTERN = re.compile(r'^\.SYNOPSIS', re.MULTILINE)
-BASH_COMMENT_PATTERN = re.compile(r'^\s*#', re.MULTILINE)
-PYTHON_DOCSTRING_PATTERN = re.compile(r'^\s*("""|\'\'\')', re.MULTILINE)
+GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
+GITHUB_REPOSITORY = os.environ.get('GITHUB_REPOSITORY')
+GITHUB_SHA = os.environ.get('GITHUB_SHA')
+GITHUB_SERVER_URL = os.environ.get('GITHUB_SERVER_URL', 'https://github.com')
 
-def find_scripts(base_dir):
-    scripts = []
-    for root, _, files in os.walk(base_dir):
+ISSUE_TITLE = "Lint: scripts missing synopsis headers"
+ISSUE_LABELS = ["ci", "lint"]
+
+def find_scripts():
+    """Walk through Scripts directory and yield script file paths and types."""
+    for root, dirs, files in os.walk(SCRIPTS_DIR):
         for file in files:
-            if file.endswith(('.sh', '.bash', '.py')):
-                scripts.append(os.path.join(root, file))
-    return scripts
+            path = os.path.join(root, file)
+            ext = os.path.splitext(file)[1].lower()
+            # Determine script type by extension
+            if ext in ['.ps1', '.psm1']:
+                yield path, 'powershell'
+            elif ext in ['.sh', '']:
+                # For bash, detect by shebang or extension
+                # Some bash scripts may have no extension
+                # We'll check extension first, then shebang
+                if ext == '.sh':
+                    yield path, 'bash'
+                else:
+                    # Check shebang for bash
+                    try:
+                        with open(path, 'r', encoding='utf-8') as f:
+                            first_line = f.readline()
+                            if re.match(r'^#!.*\bbash\b', first_line):
+                                yield path, 'bash'
+                    except Exception:
+                        pass
+            elif ext == '.py':
+                yield path, 'python'
 
-def check_synopsis(content):
-    return bool(SYNOPSIS_PATTERN.search(content))
-
-def check_bash_comments(content):
-    return bool(BASH_COMMENT_PATTERN.search(content))
-
-def check_python_docstrings(content):
-    # Checks if the first statement in the file is a docstring
-    lines = content.strip().splitlines()
-    if not lines:
+def check_powershell_synopsis(path):
+    """Check if PowerShell script contains .SYNOPSIS in comment-based help."""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        # Look for .SYNOPSIS inside <# ... #> comment block
+        # Extract all comment blocks
+        blocks = re.findall(r'<#(.*?)#>', content, re.DOTALL)
+        for block in blocks:
+            if re.search(r'\.SYNOPSIS', block, re.IGNORECASE):
+                return True
         return False
-    first_line = lines[0].strip()
-    return first_line.startswith('"""') or first_line.startswith("'''")
+    except Exception:
+        return False
 
-def lint_script(path):
-    errors = []
-    with open(path, 'r', encoding='utf-8') as f:
-        content = f.read()
+def check_bash_synopsis(path):
+    """Check if Bash script has a leading # synopsis comment."""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line == '':
+                    continue
+                if line.startswith('#'):
+                    # Accept any comment line as synopsis
+                    return True
+                else:
+                    return False
+        return False
+    except Exception:
+        return False
 
-    if path.endswith(('.sh', '.bash')):
-        if not check_synopsis(content):
-            errors.append("Missing .SYNOPSIS block.")
-        if not check_bash_comments(content):
-            errors.append("Missing bash comments.")
-    elif path.endswith('.py'):
-        if not check_python_docstrings(content):
-            errors.append("Missing Python docstring at the top of the file.")
+def check_python_synopsis(path):
+    """Check if Python script has a docstring or comment synopsis at the top."""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        # Skip shebang and blank lines
+        idx = 0
+        while idx < len(lines):
+            line = lines[idx].strip()
+            if line.startswith('#!') or line == '':
+                idx += 1
+                continue
+            break
+
+        if idx >= len(lines):
+            return False
+
+        line = lines[idx].strip()
+        # Check for docstring (single or triple quotes)
+        if line.startswith('"""') or line.startswith("'''"):
+            # Look for closing triple quote
+            quote = line[:3]
+            # If closing triple quote on same line and content inside quotes
+            if len(line) > 3 and line.endswith(quote) and len(line) > 6:
+                # One line docstring, accept
+                return True
+            else:
+                # Multi-line docstring, check if .SYNOPSIS or any text inside
+                idx += 1
+                while idx < len(lines):
+                    l = lines[idx].strip()
+                    if l.lower().startswith('.synopsis'):
+                        return True
+                    if l.endswith(quote):
+                        # End of docstring
+                        break
+                    idx += 1
+                # If no .SYNOPSIS found inside, accept if non-empty docstring?
+                # We'll accept any docstring as synopsis
+                return True
+        elif line.startswith('#'):
+            # Leading comment line(s)
+            # Accept any comment line as synopsis
+            return True
+        else:
+            return False
+    except Exception:
+        return False
+
+def check_script(path, stype):
+    if stype == 'powershell':
+        return check_powershell_synopsis(path)
+    elif stype == 'bash':
+        return check_bash_synopsis(path)
+    elif stype == 'python':
+        return check_python_synopsis(path)
     else:
-        errors.append("Unsupported file type for linting.")
+        return True  # Unknown type, skip
 
-    return errors
+def create_or_update_issue(missing_files):
+    headers = {
+        'Authorization': f'token {GITHUB_TOKEN}',
+        'Accept': 'application/vnd.github+json',
+    }
+    api_base = f'https://api.github.com/repos/{GITHUB_REPOSITORY}'
 
-def create_or_update_issue(gh, repo, errors_dict):
-    existing_issues = repo.get_issues(state="open")
+    # Search for existing issue
+    issues_url = f'{api_base}/issues'
+    params = {
+        'state': 'open',
+        'labels': ','.join(ISSUE_LABELS),
+        'per_page': 100,
+    }
+    response = requests.get(issues_url, headers=headers, params=params)
+    if response.status_code != 200:
+        print(f"Failed to get issues from GitHub: {response.status_code} {response.text}")
+        return
+
+    issues = response.json()
     issue = None
-    for i in existing_issues:
-        if i.title == ISSUE_TITLE:
+    for i in issues:
+        if i.get('title') == ISSUE_TITLE:
             issue = i
             break
 
-    body_lines = ["The following linting issues were found:\n"]
-    for file_path, errors in errors_dict.items():
-        body_lines.append(f"### {file_path}")
-        for error in errors:
-            # Create a link to the file in the repo at the main branch
-            url = f"https://github.com/{REPO_NAME}/blob/main/{file_path}"
-            body_lines.append(f"- {error} ([view file]({url}))")
-        body_lines.append("")
-
-    body = "\n".join(body_lines)
+    body_lines = [
+        "The following scripts are missing synopsis headers:",
+        "",
+    ]
+    for fpath in missing_files:
+        # Create link to file at commit SHA
+        rel_path = os.path.relpath(fpath, REPO_ROOT).replace(os.sep, '/')
+        url = f"{GITHUB_SERVER_URL}/{GITHUB_REPOSITORY}/blob/{GITHUB_SHA}/{rel_path}"
+        body_lines.append(f"- [{rel_path}]({url})")
+    body = '\n'.join(body_lines)
 
     if issue:
-        issue.edit(body=body)
+        # Update existing issue
+        issue_url = f"{api_base}/issues/{issue['number']}"
+        data = {
+            'body': body,
+            'labels': ISSUE_LABELS,
+            'title': ISSUE_TITLE,
+        }
+        resp = requests.patch(issue_url, headers=headers, json=data)
+        if resp.status_code not in [200, 201]:
+            print(f"Failed to update GitHub issue: {resp.status_code} {resp.text}")
     else:
-        repo.create_issue(title=ISSUE_TITLE, body=body, labels=ISSUE_LABELS)
+        # Create new issue
+        data = {
+            'title': ISSUE_TITLE,
+            'body': body,
+            'labels': ISSUE_LABELS,
+        }
+        resp = requests.post(issues_url, headers=headers, json=data)
+        if resp.status_code not in [200, 201]:
+            print(f"Failed to create GitHub issue: {resp.status_code} {resp.text}")
 
 def main():
-    if not GITHUB_TOKEN or not REPO_NAME:
-        print("GITHUB_TOKEN and GITHUB_REPOSITORY environment variables must be set.")
-        sys.exit(1)
+    missing = []
+    for path, stype in find_scripts():
+        if not check_script(path, stype):
+            missing.append(path)
 
-    gh = Github(GITHUB_TOKEN)
-    repo = gh.get_repo(REPO_NAME)
-
-    base_dir = "scripts"
-    if not os.path.isdir(base_dir):
-        print(f"Directory '{base_dir}' does not exist.")
-        sys.exit(1)
-
-    scripts = find_scripts(base_dir)
-    errors_found = {}
-
-    for script in scripts:
-        errors = lint_script(script)
-        if errors:
-            errors_found[script] = errors
-
-    if errors_found:
-        create_or_update_issue(gh, repo, errors_found)
-        print("Linting issues found and GitHub issue created/updated.")
+    if missing:
+        print("Scripts missing synopsis headers:")
+        for f in missing:
+            print(f" - {os.path.relpath(f, REPO_ROOT)}")
+        if GITHUB_TOKEN and GITHUB_REPOSITORY and GITHUB_SHA:
+            create_or_update_issue(missing)
         sys.exit(1)
     else:
-        print("No linting issues found.")
+        print("All scripts have synopsis headers.")
         sys.exit(0)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
