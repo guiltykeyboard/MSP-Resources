@@ -3,10 +3,12 @@ name: Build Script Catalog
 on:
   push:
     branches: [ main ]
+  schedule:
+    - cron: '0 5 * * *'   # nightly at 05:00 UTC
   workflow_dispatch: {}
 
 permissions:
-  contents: write          # needed for auto-merge and to let GH mark the PR as mergeable
+  contents: write          # needed for pushing branch & enabling auto-merge
   pull-requests: write
 
 jobs:
@@ -22,22 +24,72 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+
+      - name: Record base SHA & create fresh PR branch from latest main
+        run: |
+          git fetch origin
+          BASE_SHA=$(git rev-parse origin/main)
+          echo "BASE_SHA=$BASE_SHA" >> $GITHUB_ENV
+          # Start clean branch so it is never behind main at start
+          git checkout -B chore/auto-update-catalog "${BASE_SHA}"
+
       - name: Generate catalog
         run: |
           python3 tools/build_catalog.py
 
-      - name: Create PR with updated catalog
+      - name: Commit changes (if any)
+        run: |
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git add README.md
+            git commit -m "chore: auto-update script catalog"
+          else
+            echo "No README changes at first pass."
+          fi
+
+      - name: Anti-drift check (did main move during generation?)
+        run: |
+          git fetch origin
+          NEW_SHA=$(git rev-parse origin/main)
+          echo "BASE_SHA=$BASE_SHA  NEW_SHA=$NEW_SHA"
+          if [[ "$NEW_SHA" != "$BASE_SHA" ]]; then
+            echo "Main advanced during run; resetting branch to NEW_SHA and regenerating."
+            git reset --hard "$NEW_SHA"
+            python3 tools/build_catalog.py
+            if [[ -n "$(git status --porcelain)" ]]; then
+              git add README.md
+              git commit -m "chore: auto-update script catalog (anti-drift)"
+            else
+              echo "No README changes after anti-drift regen."
+            fi
+          fi
+
+      - name: Push PR branch (if there are commits)
+        run: |
+          if git rev-parse --verify chore/auto-update-catalog >/dev/null 2>&1; then
+            if [[ -n "$(git log origin/chore/auto-update-catalog..HEAD --oneline || true)" ]]; then
+              git push -u origin chore/auto-update-catalog --force
+            else
+              echo "Branch already up to date on remote."
+            fi
+          fi
+
+      - name: Create or update PR
         id: cpr
         uses: peter-evans/create-pull-request@v6
         with:
-          commit-message: "chore: auto-update script catalog"
+          branch: chore/auto-update-catalog
+          base: main
           title: "chore: auto-update script catalog"
           body: "Automated update of the README Generated index."
-          branch: chore/auto-update-catalog
-          delete-branch: true
+          commit-message: "chore: auto-update script catalog"
           labels: |
             ci-catalog
             automation
+          delete-branch: true
 
       - name: Enable auto-merge (squash)
         if: ${{ steps.cpr.outputs.pull-request-number }}
