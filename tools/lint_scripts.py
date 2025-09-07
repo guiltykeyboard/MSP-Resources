@@ -1,213 +1,112 @@
-import os
-import re
-import sys
-import subprocess
-import requests
+# MSP-Resources
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-SCRIPTS_DIR = os.path.join(REPO_ROOT, 'ConnectWise-RMM-Asio', 'Scripts')
+Scripts and resources for **ConnectWise RMM (Asio)** automation across Windows, Linux, and macOS.
 
-GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
-GITHUB_REPOSITORY = os.environ.get('GITHUB_REPOSITORY')
-GITHUB_SHA = os.environ.get('GITHUB_SHA')
-GITHUB_SERVER_URL = os.environ.get('GITHUB_SERVER_URL', 'https://github.com')
+[![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-0078d4?logo=powershell&logoColor=white)](#)
+[![Bash](https://img.shields.io/badge/Bash-4%2B-4EAA25?logo=gnubash&logoColor=white)](#)
+[![Python](https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white)](#)
+[![MIT License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Catalog](https://img.shields.io/github/actions/workflow/status/guiltykeyboard/MSP-Resources/build-catalog.yml?label=Catalog&logo=github)](../../actions/workflows/build-catalog.yml)
+[![Lint](https://img.shields.io/github/actions/workflow/status/guiltykeyboard/MSP-Resources/lint-scripts.yml?label=Lint&logo=github)](../../actions/workflows/lint-scripts.yml)
 
-ISSUE_TITLE = "Lint: scripts missing synopsis headers"
-ISSUE_LABELS = ["ci", "lint"]
+---
 
-def find_scripts():
-    """Walk through Scripts directory and yield script file paths and types."""
-    for root, dirs, files in os.walk(SCRIPTS_DIR):
-        for file in files:
-            path = os.path.join(root, file)
-            ext = os.path.splitext(file)[1].lower()
-            # Determine script type by extension
-            if ext in ['.ps1', '.psm1']:
-                yield path, 'powershell'
-            elif ext in ['.sh', '']:
-                # For bash, detect by shebang or extension
-                # Some bash scripts may have no extension
-                # We'll check extension first, then shebang
-                if ext == '.sh':
-                    yield path, 'bash'
-                else:
-                    # Check shebang for bash
-                    try:
-                        with open(path, 'r', encoding='utf-8') as f:
-                            first_line = f.readline()
-                            if re.match(r'^#!.*\bbash\b', first_line):
-                                yield path, 'bash'
-                    except Exception:
-                        pass
-            elif ext == '.py':
-                yield path, 'python'
+## Table of Contents
+- [Overview](#overview)
+- [Script Catalog](#script-catalog)
+- [One‑Liners for RMM](#one-liners-for-rmm)
+- [Recommended Folder Structure](#recommended-folder-structure)
+- [Script Documentation Template](#script-documentation-template)
+- [License](#license)
 
-def check_powershell_synopsis(path):
-    """Check if PowerShell script contains .SYNOPSIS in comment-based help."""
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        # Look for .SYNOPSIS inside <# ... #> comment block
-        # Extract all comment blocks
-        blocks = re.findall(r'<#(.*?)#>', content, re.DOTALL)
-        for block in blocks:
-            if re.search(r'\.SYNOPSIS', block, re.IGNORECASE):
-                return True
-        return False
-    except Exception:
-        return False
+---
 
-def check_bash_synopsis(path):
-    """Check if Bash script has a leading # synopsis comment."""
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line == '':
-                    continue
-                if line.startswith('#'):
-                    # Accept any comment line as synopsis
-                    return True
-                else:
-                    return False
-        return False
-    except Exception:
-        return False
+## Overview
 
-def check_python_synopsis(path):
-    """Check if Python script has a docstring or comment synopsis at the top."""
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        # Skip shebang and blank lines
-        idx = 0
-        while idx < len(lines):
-            line = lines[idx].strip()
-            if line.startswith('#!') or line == '':
-                idx += 1
-                continue
-            break
+This repository contains a curated collection of scripts for **ConnectWise RMM (Asio)**. Scripts are designed to run as the RMM agent (often **SYSTEM** on Windows). By default, scripts emit **STDOUT/JSON** for easy parsing; many can optionally write artifacts behind a switch.
 
-        if idx >= len(lines):
-            return False
+> Keep your manual notes **outside** the generated block below. The catalog section is auto‑written by CI.
 
-        line = lines[idx].strip()
-        # Check for docstring (single or triple quotes)
-        if line.startswith('"""') or line.startswith("'''"):
-            # Look for closing triple quote
-            quote = line[:3]
-            # If closing triple quote on same line and content inside quotes
-            if len(line) > 3 and line.endswith(quote) and len(line) > 6:
-                # One line docstring, accept
-                return True
-            else:
-                # Multi-line docstring, check if .SYNOPSIS or any text inside
-                idx += 1
-                while idx < len(lines):
-                    l = lines[idx].strip()
-                    if l.lower().startswith('.synopsis'):
-                        return True
-                    if l.endswith(quote):
-                        # End of docstring
-                        break
-                    idx += 1
-                # If no .SYNOPSIS found inside, accept if non-empty docstring?
-                # We'll accept any docstring as synopsis
-                return True
-        elif line.startswith('#'):
-            # Leading comment line(s)
-            # Accept any comment line as synopsis
-            return True
-        else:
-            return False
-    except Exception:
-        return False
+---
 
-def check_script(path, stype):
-    if stype == 'powershell':
-        return check_powershell_synopsis(path)
-    elif stype == 'bash':
-        return check_bash_synopsis(path)
-    elif stype == 'python':
-        return check_python_synopsis(path)
-    else:
-        return True  # Unknown type, skip
+## Script Catalog
 
-def create_or_update_issue(missing_files):
-    headers = {
-        'Authorization': f'token {GITHUB_TOKEN}',
-        'Accept': 'application/vnd.github+json',
-    }
-    api_base = f'https://api.github.com/repos/{GITHUB_REPOSITORY}'
+<!-- GENERATED-CATALOG:START -->
+<!-- This section is auto-generated. Do not edit directly. -->
+<!-- GENERATED-CATALOG:END -->
 
-    # Search for existing issue
-    issues_url = f'{api_base}/issues'
-    params = {
-        'state': 'open',
-        'labels': ','.join(ISSUE_LABELS),
-        'per_page': 100,
-    }
-    response = requests.get(issues_url, headers=headers, params=params)
-    if response.status_code != 200:
-        print(f"Failed to get issues from GitHub: {response.status_code} {response.text}")
-        return
+---
 
-    issues = response.json()
-    issue = None
-    for i in issues:
-        if i.get('title') == ISSUE_TITLE:
-            issue = i
-            break
+## One‑Liners for RMM
 
-    body_lines = [
-        "The following scripts are missing synopsis headers:",
-        "",
-    ]
-    for fpath in missing_files:
-        # Create link to file at commit SHA
-        rel_path = os.path.relpath(fpath, REPO_ROOT).replace(os.sep, '/')
-        url = f"{GITHUB_SERVER_URL}/{GITHUB_REPOSITORY}/blob/{GITHUB_SHA}/{rel_path}"
-        body_lines.append(f"- [{rel_path}]({url})")
-    body = '\n'.join(body_lines)
+Use these templates to download and run a script directly from this repo.
 
-    if issue:
-        # Update existing issue
-        issue_url = f"{api_base}/issues/{issue['number']}"
-        data = {
-            'body': body,
-            'labels': ISSUE_LABELS,
-            'title': ISSUE_TITLE,
-        }
-        resp = requests.patch(issue_url, headers=headers, json=data)
-        if resp.status_code not in [200, 201]:
-            print(f"Failed to update GitHub issue: {resp.status_code} {resp.text}")
-    else:
-        # Create new issue
-        data = {
-            'title': ISSUE_TITLE,
-            'body': body,
-            'labels': ISSUE_LABELS,
-        }
-        resp = requests.post(issues_url, headers=headers, json=data)
-        if resp.status_code not in [200, 201]:
-            print(f"Failed to create GitHub issue: {resp.status_code} {resp.text}")
+**PowerShell (Windows):**
+```powershell
+$Base = 'https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main'
+$Rel  = '<path/to/script.ps1>'
+$Out  = 'C:\\ProgramData\\CW-RMM\\Scripts\\script.ps1'
+$null = New-Item -ItemType Directory -Force -Path (Split-Path $Out) -ErrorAction SilentlyContinue
+Invoke-WebRequest -UseBasicParsing -Uri ("$Base/$Rel") -OutFile $Out
+powershell.exe -ExecutionPolicy Bypass -File $Out
+```
 
-def main():
-    missing = []
-    for path, stype in find_scripts():
-        if not check_script(path, stype):
-            missing.append(path)
+**Bash (Linux/macOS):**
+```bash
+BASE='https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main'
+REL='<path/to/script.sh>'
+OUT='/tmp/script.sh'
+mkdir -p "$(dirname "$OUT")"
+curl -fsSL "$BASE/$REL" -o "$OUT"
+chmod +x "$OUT"
+sudo "$OUT"
+```
 
-    if missing:
-        print("Scripts missing synopsis headers:")
-        for f in missing:
-            print(f" - {os.path.relpath(f, REPO_ROOT)}")
-        if GITHUB_TOKEN and GITHUB_REPOSITORY and GITHUB_SHA:
-            create_or_update_issue(missing)
-        sys.exit(1)
-    else:
-        print("All scripts have synopsis headers.")
-        sys.exit(0)
+**Python (Linux/macOS/Windows with Python 3):**
+```bash
+BASE='https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main'
+REL='<path/to/script.py>'
+OUT='/tmp/script.py'
+mkdir -p "$(dirname "$OUT")"
+curl -fsSL "$BASE/$REL" -o "$OUT"
+python3 "$OUT"
+```
 
-if __name__ == '__main__':
-    main()
+---
+
+## Recommended Folder Structure
+
+```
+MSP-Resources/
+├── ConnectWise-RMM-Asio/
+│   └── Scripts/
+│       ├── Windows/            # PowerShell (.ps1/.psm1)
+│       ├── Linux/              # Bash / Python
+│       └── Mac/                # Bash / Python
+└── tools/                      # catalog + lint utilities
+```
+
+---
+
+## Script Documentation Template
+
+> Copy this block into new scripts (adapt for Bash/Python).
+
+```powershell
+<#
+.SYNOPSIS
+  One‑line summary.
+.DESCRIPTION
+  A few sentences on what it does and how it is intended to be run in RMM.
+.PARAMETER <Name>
+  Description.
+.EXAMPLE
+  Example usage.
+#>
+```
+
+---
+
+## License
+
+This repository is licensed under the [MIT License](LICENSE).
