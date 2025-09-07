@@ -1,82 +1,110 @@
-# ------------------------------
-# Global ignores for MSP-Resources
-# ------------------------------
+# MSP-Resources
 
-# macOS Finder metadata
+# macOS
 .DS_Store
-*/.DS_Store
-.AppleDouble
-.LSOverride
-Icon?
-._*
-.Spotlight-V100
-.Trashes
-*.icloud
 
-# Windows Explorer metadata
+# Windows
 Thumbs.db
-Thumbs.db:encryptable
 ehthumbs.db
 Desktop.ini
-$RECYCLE.BIN/
 
-# Editor/IDE configs
+# IDEs and editors
 .vscode/
-*.code-workspace
 .idea/
-*.swp
-*.swo
-*.tmp
-
-# Logs / temp / local output
-logs/
-log/
-*.log
-*.tmp
-tmp/
-.temp/
-.cache/
-
-# Archives & bundles
-*.zip
-*.tar
-*.tar.gz
-*.tgz
-*.7z
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
 
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
-.venv/
-venv/
-.env
-.env.*
-.python-version
-.pytest_cache/
-.coverage
 
-# Node / package managers (just in case helpers get added later)
-node_modules/
-.pnpm-store/
-.npm/
-.yarn/
-
-# Build output (generic)
-dist/
+# Distribution / packaging
+.Python
 build/
-release/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# PowerShell artifacts (keep scripts, ignore transcripts/outputs)
-*_Transcript.log
-*.pshistory
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
 
-# Repo-specific: keep scripts in source, ignore local output folders if created
-output/
-out/
-artifacts/
-reports/
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
 
-# OS-specific junk in subfolders
-**/.DS_Store
-**/Thumbs.db
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# pipenv
+pipenv.lock
+
+# pytest
+.cache/
+
+# mypy
+.mypy_cache/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# Backup files
+*~
+*.bak
+*.swp
+*.swo
+*.tmp
+*.temp

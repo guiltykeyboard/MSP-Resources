@@ -1,82 +1,124 @@
-# ------------------------------
-# Global ignores for MSP-Resources
-# ------------------------------
+#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    Backup BitLocker recovery keys to a JSON file and optionally to Active Directory.
 
-# macOS Finder metadata
-.DS_Store
-*/.DS_Store
-.AppleDouble
-.LSOverride
-Icon?
-._*
-.Spotlight-V100
-.Trashes
-*.icloud
+.DESCRIPTION
+    This script exports BitLocker recovery key information for all encrypted drives on the local computer.
+    By default, it outputs the recovery key information in JSON format to the console.
+    Use the -WriteFiles parameter to save each recovery key to a separate file in the current directory.
+    Use the -BackupToAD switch to attempt to back up the recovery keys to Active Directory.
+    The -Quiet switch suppresses output except for errors.
 
-# Windows Explorer metadata
-Thumbs.db
-Thumbs.db:encryptable
-ehthumbs.db
-Desktop.ini
-$RECYCLE.BIN/
+.PARAMETER WriteFiles
+    Saves each recovery key to a separate .txt file named after the volume drive letter.
 
-# Editor/IDE configs
-.vscode/
-*.code-workspace
-.idea/
-*.swp
-*.swo
-*.tmp
+.PARAMETER BackupToAD
+    Attempts to back up the recovery key to Active Directory for each volume.
 
-# Logs / temp / local output
-logs/
-log/
-*.log
-*.tmp
-tmp/
-.temp/
-.cache/
+.PARAMETER Quiet
+    Suppresses output except for errors.
 
-# Archives & bundles
-*.zip
-*.tar
-*.tar.gz
-*.tgz
-*.7z
+.EXAMPLE
+    .\backupBitlockerKeys.ps1 -WriteFiles
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-venv/
-.env
-.env.*
-.python-version
-.pytest_cache/
-.coverage
+    Outputs the recovery keys to separate files in the current directory.
 
-# Node / package managers (just in case helpers get added later)
-node_modules/
-.pnpm-store/
-.npm/
-.yarn/
+.EXAMPLE
+    .\backupBitlockerKeys.ps1 -BackupToAD
 
-# Build output (generic)
-dist/
-build/
-release/
+    Tries to back up the recovery keys to Active Directory.
 
-# PowerShell artifacts (keep scripts, ignore transcripts/outputs)
-*_Transcript.log
-*.pshistory
+.EXAMPLE
+    .\backupBitlockerKeys.ps1 -Quiet
 
-# Repo-specific: keep scripts in source, ignore local output folders if created
-output/
-out/
-artifacts/
-reports/
+    Outputs only errors.
 
-# OS-specific junk in subfolders
-**/.DS_Store
-**/Thumbs.db
+#>
+
+[CmdletBinding()]
+param(
+    [switch]$WriteFiles,
+    [switch]$BackupToAD,
+    [switch]$Quiet
+)
+
+function Write-Log {
+    param (
+        [string]$Message,
+        [switch]$Error
+    )
+    if (-not $Quiet -or $Error) {
+        if ($Error) {
+            Write-Error $Message
+        }
+        else {
+            Write-Output $Message
+        }
+    }
+}
+
+try {
+    $bitlockerVolumes = Get-BitLockerVolume | Where-Object { $_.KeyProtector -ne $null }
+}
+catch {
+    Write-Log "Failed to retrieve BitLocker volumes. Are you running as Administrator?" -Error
+    exit 1
+}
+
+if (-not $bitlockerVolumes) {
+    Write-Log "No BitLocker volumes found or no key protectors present."
+    exit 0
+}
+
+$results = @()
+
+foreach ($vol in $bitlockerVolumes) {
+    $volumeLetter = $vol.VolumeLetter
+    $recoveryKeyProtector = $vol.KeyProtector | Where-Object { $_.KeyProtectorType -eq 'RecoveryPassword' }
+
+    if (-not $recoveryKeyProtector) {
+        Write-Log "No recovery password protector found for volume $volumeLetter."
+        continue
+    }
+
+    $recoveryKey = $recoveryKeyProtector.RecoveryPassword
+
+    $result = [PSCustomObject]@{
+        VolumeLetter       = $volumeLetter
+        RecoveryKey        = $recoveryKey
+        ProtectionStatus   = $vol.ProtectionStatus
+        LockStatus         = $vol.LockStatus
+        EncryptionMethod   = $vol.EncryptionMethod
+        AutoUnlockEnabled  = $vol.AutoUnlockEnabled
+        KeyProtectorType   = $recoveryKeyProtector.KeyProtectorType
+        RecoveryKeyId      = $recoveryKeyProtector.RecoveryKeyId
+    }
+
+    $results += $result
+
+    if ($WriteFiles) {
+        $fileName = "BitLockerRecoveryKey_$volumeLetter.txt"
+        try {
+            $recoveryKey | Out-File -FilePath $fileName -Encoding ASCII -Force
+            Write-Log "Saved recovery key for volume $volumeLetter to file $fileName"
+        }
+        catch {
+            Write-Log "Failed to write recovery key file for volume $volumeLetter: $_" -Error
+        }
+    }
+
+    if ($BackupToAD) {
+        try {
+            Backup-BitLockerKeyProtector -MountPoint $volumeLetter -KeyProtectorId $recoveryKeyProtector.KeyProtectorId -ErrorAction Stop
+            Write-Log "Backed up recovery key for volume $volumeLetter to Active Directory."
+        }
+        catch {
+            Write-Log "Failed to back up recovery key to Active Directory for volume $volumeLetter: $_" -Error
+        }
+    }
+}
+
+if (-not $WriteFiles) {
+    $results | ConvertTo-Json -Depth 3
+}
