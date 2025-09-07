@@ -2,9 +2,9 @@
 
 Scripts and resources for **ConnectWise RMM (Asio)** automation across Windows, Linux, and macOS.
 
-[![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-0078d4?logo=powershell&logoColor=white)](#)
-[![Bash](https://img.shields.io/badge/Bash-4%2B-4EAA25?logo=gnubash&logoColor=white)](#)
-[![Python](https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white)](#)
+[![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-0078d4?logo=powershell&logoColor=white)](ConnectWise-RMM-Asio/Scripts/Windows/)
+[![Bash](https://img.shields.io/badge/Bash-4%2B-4EAA25?logo=gnubash&logoColor=white)](ConnectWise-RMM-Asio/Scripts/Linux/)
+[![Python](https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white)](tools/)
 [![MIT License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Catalog](https://img.shields.io/github/actions/workflow/status/guiltykeyboard/MSP-Resources/build-catalog.yml?label=Catalog&logo=github)](../../actions/workflows/build-catalog.yml)
 [![Lint](https://img.shields.io/github/actions/workflow/status/guiltykeyboard/MSP-Resources/lint-scripts.yml?label=Lint&logo=github)](../../actions/workflows/lint-scripts.yml)
@@ -12,9 +12,10 @@ Scripts and resources for **ConnectWise RMM (Asio)** automation across Windows, 
 ---
 
 ## Table of Contents
+
 - [Overview](#overview)
 - [Script Catalog](#script-catalog)
-- [One‑Liners for RMM](#one-liners-for-rmm)
+- [One-Liners for RMM](#one-liners-for-rmm)
 - [Recommended Folder Structure](#recommended-folder-structure)
 - [Script Documentation Template](#script-documentation-template)
 - [License](#license)
@@ -39,11 +40,12 @@ This repository contains a curated collection of scripts for **ConnectWise RMM (
 
 ---
 
-## One‑Liners for RMM
+## One-Liners for RMM
 
 Use these templates to download and run a script directly from this repo.
 
 **PowerShell (Windows):**
+
 ```powershell
 $Base = 'https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main'
 $Rel  = '<path/to/script.ps1>'
@@ -54,6 +56,7 @@ powershell.exe -ExecutionPolicy Bypass -File $Out
 ```
 
 **Bash (Linux/macOS):**
+
 ```bash
 BASE='https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main'
 REL='<path/to/script.sh>'
@@ -65,6 +68,7 @@ sudo "$OUT"
 ```
 
 **Python (Linux/macOS/Windows with Python 3):**
+
 ```bash
 BASE='https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main'
 REL='<path/to/script.py>'
@@ -78,7 +82,7 @@ python3 "$OUT"
 
 ## Recommended Folder Structure
 
-```
+```text
 MSP-Resources/
 ├── ConnectWise-RMM-Asio/
 │   └── Scripts/

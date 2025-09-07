@@ -6,6 +6,8 @@ Synopsis linter for MSP-Resources.
 - When running inside GitHub Actions (GITHUB_ACTIONS=true) and failures are found,
   the script will create or update a GitHub Issue with details **including direct links**
   to the offending files at the current commit SHA, and label it `ci` and `lint`.
+- When all scripts pass, the script will find any open issue with the same title,
+  post a comment that the issue is resolved with the current commit SHA, and close it.
 
 Supported headers:
   * PowerShell: .ps1/.psm1/.ps1xml — comment-help block <# ... #> with a `.SYNOPSIS` line
@@ -33,6 +35,80 @@ PY_EXTS   = {".py"}
 ISSUE_TITLE = "Lint: scripts missing synopsis headers"
 
 # ---------------------
+# GitHub Issue helpers
+# ---------------------
+
+def gh_api(url: str, token: str, method: str = "GET", payload: dict | None = None):
+    req = urllib.request.Request(url, method=method)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, data=data) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+def get_open_issue_by_title(repo: str, token: str, title: str):
+    try:
+        issues = gh_api(f"https://api.github.com/repos/{repo}/issues?state=open&per_page=100", token)
+        for it in issues:
+            if it.get("title") == title:
+                return it
+    except Exception as e:
+        sys.stderr.write(f"Warning: failed to list issues: {e}\n")
+    return None
+
+def ensure_issue(repo: str, token: str, title: str, body: str):
+    try:
+        existing = get_open_issue_by_title(repo, token, title)
+        if existing:
+            gh_api(
+                f"https://api.github.com/repos/{repo}/issues/{existing['number']}",
+                token,
+                method="PATCH",
+                payload={"body": body, "labels": ["ci", "lint"]},
+            )
+            return existing['number']
+        created = gh_api(
+            f"https://api.github.com/repos/{repo}/issues",
+            token,
+            method="POST",
+            payload={"title": title, "body": body, "labels": ["ci", "lint"]},
+        )
+        return created.get("number")
+    except urllib.error.HTTPError as e:
+        sys.stderr.write(f"Warning: failed to create/update GitHub issue ({e.code}): {e.read().decode('utf-8', 'ignore')[:200]}\n")
+        return None
+    except Exception as e:
+        sys.stderr.write(f"Warning: failed to create/update GitHub issue: {e}\n")
+        return None
+
+def close_issue_if_open(repo: str, token: str, title: str, comment: str):
+    try:
+        issue = get_open_issue_by_title(repo, token, title)
+        if not issue:
+            return None
+        num = issue["number"]
+        gh_api(
+            f"https://api.github.com/repos/{repo}/issues/{num}/comments",
+            token,
+            method="POST",
+            payload={"body": comment},
+        )
+        gh_api(
+            f"https://api.github.com/repos/{repo}/issues/{num}",
+            token,
+            method="PATCH",
+            payload={"state": "closed"},
+        )
+        return num
+    except Exception as e:
+        sys.stderr.write(f"Warning: failed to close issue: {e}\n")
+        return None
+
+# ---------------------
 # Parsing helpers
 # ---------------------
 
@@ -43,7 +119,6 @@ def read_text(p: Path) -> str:
         return ""
 
 def has_ps_synopsis(text: str) -> bool:
-    # Find the first comment-help block and check for .SYNOPSIS
     m = re.search(r"<#([\s\S]*?)#>", text, re.MULTILINE)
     if not m:
         return False
@@ -66,13 +141,11 @@ def extract_bash_synopsis(text: str) -> str:
     return ""
 
 def extract_py_synopsis(text: str) -> str:
-    # Module docstring
     m = re.match(r'\s*[rRuU]?((?:"""|\'\'\'))([\s\S]*?)(\1)', text)
     if m:
         doc = m.group(2).strip()
         if doc:
             return doc.splitlines()[0].strip()
-    # Fallback to leading comment
     for ln in text.splitlines():
         s = ln.strip()
         if s.startswith("#"):
@@ -82,50 +155,6 @@ def extract_py_synopsis(text: str) -> str:
         elif s:
             break
     return ""
-
-# ---------------------
-# GitHub Issue helpers
-# ---------------------
-
-def gh_api(url: str, token: str, method: str = "GET", payload: dict | None = None):
-    req = urllib.request.Request(url, method=method)
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("X-GitHub-Api-Version", "2022-11-28")
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-        req.add_header("Content-Type", "application/json")
-    else:
-        data = None
-    with urllib.request.urlopen(req, data=data) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-def ensure_issue(repo: str, token: str, title: str, body: str):
-    try:
-        # Find existing open issue with the same title
-        issues = gh_api(f"https://api.github.com/repos/{repo}/issues?state=open&per_page=100", token)
-        for it in issues:
-            if it.get("title") == title:
-                gh_api(
-                    f"https://api.github.com/repos/{repo}/issues/{it['number']}",
-                    token,
-                    method="PATCH",
-                    payload={"body": body, "labels": ["ci", "lint"]},
-                )
-                return it['number']
-        created = gh_api(
-            f"https://api.github.com/repos/{repo}/issues",
-            token,
-            method="POST",
-            payload={"title": title, "body": body, "labels": ["ci", "lint"]},
-        )
-        return created.get("number")
-    except urllib.error.HTTPError as e:
-        sys.stderr.write(f"Warning: failed to create/update GitHub issue ({e.code}): {e.read().decode('utf-8', 'ignore')[:200]}\n")
-        return None
-    except Exception as e:
-        sys.stderr.write(f"Warning: failed to create/update GitHub issue: {e}\n")
-        return None
 
 # ---------------------
 # Main
@@ -153,11 +182,13 @@ def main() -> int:
                 if not extract_py_synopsis(txt):
                     missing.append((p, "Python script missing module docstring (or leading # synopsis)"))
 
-    if missing:
-        server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
-        repo = os.environ.get("GITHUB_REPOSITORY", "")
-        sha = os.environ.get("GITHUB_SHA", "main")
+    in_actions = os.environ.get("GITHUB_ACTIONS") == "true"
+    server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    sha = os.environ.get("GITHUB_SHA", "main")
+    token = os.environ.get("GITHUB_TOKEN", "")
 
+    if missing:
         body_lines = [
             "## Synopsis linter failures",
             "The following scripts are missing required synopsis headers:",
@@ -176,18 +207,20 @@ def main() -> int:
         ]
         body = "\n".join(body_lines)
 
-        if os.environ.get("GITHUB_ACTIONS") == "true":
-            token = os.environ.get("GITHUB_TOKEN", "")
-            if repo and token:
-                ensure_issue(repo, token, ISSUE_TITLE, body)
-            else:
-                sys.stderr.write("Warning: GITHUB_REPOSITORY/GITHUB_TOKEN not available; skipping issue creation.\n")
+        if in_actions and repo and token:
+            ensure_issue(repo, token, ISSUE_TITLE, body)
+        elif in_actions:
+            sys.stderr.write("Warning: GITHUB_REPOSITORY/GITHUB_TOKEN not available; skipping issue creation.\n")
 
         print("❌ Synopsis check failed for the following scripts:\n")
         for p, why in missing:
             print(f"- {p.relative_to(REPO_ROOT)} → {why}")
         print("\nAdd a short synopsis header (see README Script Documentation Template).")
         return 1
+
+    if in_actions and repo and token:
+        comment = f"Linter passed at {sha}. All scripts contain synopsis headers. Closing this issue."
+        close_issue_if_open(repo, token, ISSUE_TITLE, comment)
 
     print("✅ All scripts have required synopsis headers.")
     return 0
