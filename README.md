@@ -122,3 +122,80 @@ foreach ($vol in $bitlockerVolumes) {
 if (-not $WriteFiles) {
     $results | ConvertTo-Json -Depth 3
 }
+
+# MSP-Resources
+
+<p align="left">
+  <img src="https://img.shields.io/badge/PowerShell-0078d4?logo=powershell&logoColor=white" alt="PowerShell Badge">
+  <img src="https://img.shields.io/badge/Bash-4EAA25?logo=gnubash&logoColor=white" alt="Bash Badge">
+  <img src="https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white" alt="Python Badge">
+  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License Badge">
+  <img src="https://github.com/mstoffel/MSP-Resources/actions/workflows/catalog.yml/badge.svg" alt="Catalog Workflow">
+  <img src="https://github.com/mstoffel/MSP-Resources/actions/workflows/lint.yml/badge.svg" alt="Lint Workflow">
+</p>
+
+## Table of Contents
+- [Overview](#overview)
+- [Script Catalog](#script-catalog)
+- [Recommended Folder Structure](#recommended-folder-structure)
+- [Script Documentation Template](#script-documentation-template)
+- [License](#license)
+
+## Overview
+**MSP-Resources** is a curated collection of scripts and resources for Managed Service Providers (MSPs), IT professionals, and sysadmins. This repository contains reusable automation scripts, tools, and templates designed to streamline IT operations, automate routine tasks, and support best practices across Windows, Linux, and cross-platform environments.
+
+Scripts are provided in PowerShell, Bash, and Python, each with clear documentation and recommended usage scenarios. Contributions and improvements are welcome!
+
+## Script Catalog
+<!-- GENERATED-CATALOG:START -->
+
+<!--
+  The script catalog below is auto-generated.
+  Please do not edit this section manually.
+-->
+
+<!-- GENERATED-CATALOG:END -->
+
+## Recommended Folder Structure
+
+```
+MSP-Resources/
+├── powershell/        # PowerShell scripts (*.ps1)
+├── bash/              # Bash scripts (*.sh)
+├── python/            # Python scripts (*.py)
+├── docs/              # Additional documentation
+├── templates/         # Script templates and examples
+├── .github/           # GitHub workflows and issue templates
+└── README.md          # Project documentation
+```
+
+## Script Documentation Template
+
+All scripts should include a header block with essential metadata and usage information. Below is a recommended template (for PowerShell; adapt as needed for Bash or Python):
+
+```powershell
+<#
+.SYNOPSIS
+    Short summary of what the script does.
+
+.DESCRIPTION
+    Detailed description of the script, its purpose, and any important details.
+
+.PARAMETER <ParameterName>
+    Description of the parameter.
+
+.EXAMPLE
+    Example usage of the script.
+
+.NOTES
+    Author: Your Name
+    Date: YYYY-MM-DD
+    Version: 1.0
+#>
+```
+
+For Bash or Python, provide similar metadata as comments at the top of the script.
+
+## License
+
+This repository is licensed under the [MIT License](LICENSE).
