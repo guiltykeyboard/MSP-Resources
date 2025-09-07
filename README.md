@@ -223,3 +223,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+<!-- GENERATED-CATALOG:START -->
+- **ConnectWise-RMM-Asio/Scripts**
+  - `ConnectWise-RMM-Asio/Scripts/Windows/backupBitlockerKeys.ps1` — Backup and inventory BitLocker recovery keys on this device.
+  - `ConnectWise-RMM-Asio/Scripts/Windows/checkIfBitlockerEnabled.ps1`
+  - `ConnectWise-RMM-Asio/Scripts/backupBitlockerKeys.ps1` — Backup BitLocker Recovery Keys to files and optionally to Active Directory.
+<!-- GENERATED-CATALOG:END -->
