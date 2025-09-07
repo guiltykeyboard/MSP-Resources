@@ -148,12 +148,10 @@ Scripts are provided in PowerShell, Bash, and Python, each with clear documentat
 
 ## Script Catalog
 <!-- GENERATED-CATALOG:START -->
-
-<!--
-  The script catalog below is auto-generated.
-  Please do not edit this section manually.
--->
-
+- **ConnectWise-RMM-Asio/Scripts**
+  - `ConnectWise-RMM-Asio/Scripts/Windows/backupBitlockerKeys.ps1` — Backup and inventory BitLocker recovery keys on this device.
+  - `ConnectWise-RMM-Asio/Scripts/Windows/checkIfBitlockerEnabled.ps1`
+  - `ConnectWise-RMM-Asio/Scripts/backupBitlockerKeys.ps1` — Backup BitLocker Recovery Keys to files and optionally to Active Directory.
 <!-- GENERATED-CATALOG:END -->
 
 ## Recommended Folder Structure
