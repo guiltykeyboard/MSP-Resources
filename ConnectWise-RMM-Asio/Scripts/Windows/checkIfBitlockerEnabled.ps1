@@ -111,5 +111,6 @@ $anyEnabledFixed = $null -ne ($bitlockerMap.Values | Where-Object { $_ }) -and (
 
 # Emit single-line boolean for CW RMM custom field mapping
 if ($anyEnabledFixed) { Write-Output '1' } else { Write-Output '0' }
+Write-Output ("BITLOCKER_FIXED_ENABLED={0}" -f ([int]$anyEnabledFixed))
 
 exit 0
