@@ -109,8 +109,10 @@ $fixedLetters = Get-FixedDriveLetters
 $bitlockerMap = Get-BitLockerEnabledMap -DriveLetters $fixedLetters
 $anyEnabledFixed = $null -ne ($bitlockerMap.Values | Where-Object { $_ }) -and (($bitlockerMap.Values | Where-Object { $_ }).Count -gt 0)
 
-# Emit single-line boolean for CW RMM custom field mapping
-if ($anyEnabledFixed) { Write-Output '1' } else { Write-Output '0' }
+# Emit marker first (some RMM UIs capture only the first stdout line)
 Write-Output ("BITLOCKER_FIXED_ENABLED={0}" -f ([int]$anyEnabledFixed))
+
+# Then emit bare 1/0 for legacy parsers
+if ($anyEnabledFixed) { Write-Output '1' } else { Write-Output '0' }
 
 exit 0
