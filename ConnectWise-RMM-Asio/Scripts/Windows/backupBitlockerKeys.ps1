@@ -129,7 +129,9 @@ function Add-RecoveryPasswordProtector {
   }
 }
 
-if (-not $script:AddRPDiag) { $script:AddRPDiag = @{} }
+if (-not (Get-Variable -Name 'AddRPDiag' -Scope Script -ErrorAction SilentlyContinue)) {
+  Set-Variable -Name 'AddRPDiag' -Scope Script -Value @{}
+}
 
 function Get-FixedDriveLetters {
   $letters = @()
