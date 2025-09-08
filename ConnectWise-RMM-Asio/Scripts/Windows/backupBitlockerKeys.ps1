@@ -81,7 +81,7 @@ function Get-DeviceJoinState {
 }
 
 function Get-RecoveryPasswordsFromManageBde {
-  param([Parameter(Mandatory)][ValidatePattern('^[A-Fa-f]$')] [string]$Drive)
+  param([Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')] [string]$Drive)
   $present = Test-Path ("${Drive}:")
   if (-not $present) { return @() }
   try {
@@ -148,7 +148,9 @@ try {
 
   foreach ($dl in $fixed) {
     $items = Get-RecoveryPasswordsFromManageBde -Drive $dl
-    $drivesOut[$dl] = [ordered]@{ HasKeys = [bool]($items.Count -gt 0); RecoveryPasswords = @($items) }
+    if ($null -eq $items) { $items = @() }
+    $items = @($items)
+    $drivesOut[$dl] = [ordered]@{ HasKeys = [bool]($items.Count -gt 0); RecoveryPasswords = $items }
 
     foreach ($it in $items) {
       if ($join.DomainJoined) {
@@ -162,7 +164,12 @@ try {
     }
   }
 
-  $keyCount = ($drivesOut.GetEnumerator() | ForEach-Object { $_.Value.RecoveryPasswords.Count } | Measure-Object -Sum).Sum
+  $keyCount = (
+    $drivesOut.GetEnumerator() |
+    ForEach-Object { @($_.Value.RecoveryPasswords).Count } |
+    Measure-Object -Sum
+  ).Sum
+  if ($null -eq $keyCount) { $keyCount = 0 }
 
   $payload = [ordered]@{
     Device  = [ordered]@{ DomainJoined = [bool]$join.DomainJoined; AzureAdJoined = [bool]$join.AzureAdJoined }
@@ -211,9 +218,9 @@ try {
   }
 }
 catch {
-  $errPayload = [ordered]@{ Error = $_.Exception.Message }
-  $errPayload | ConvertTo-Json -Depth 3 -Compress | Write-Output
+  Write-Error ("BACKUPBITLOCKERKEYS ERROR: " + $_.Exception.Message)
+  exit 1
 }
 
-# Always succeed so the field captures output; rely on content to signal errors
+# Success
 exit 0
