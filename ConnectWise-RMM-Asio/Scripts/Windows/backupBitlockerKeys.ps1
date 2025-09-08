@@ -107,6 +107,26 @@ function Get-RecoveryPasswordsFromManageBde {
   } catch { return @() }
 }
 
+function Ensure-RecoveryPassword {
+  param([Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')] [string]$Drive)
+  try {
+    # If a numerical/recovery password already exists, we're done
+    $raw = & manage-bde -protectors -get "${Drive}:" 2>$null
+    if ($raw -match 'Numerical\s*Password' -or $raw -match '^\s*Password:\s*[0-9\- ]{20,}') { return $true }
+
+    # Add a recovery password protector
+    $null = & manage-bde -protectors -add "${Drive}:" -rp 2>$null
+    if ($LASTEXITCODE -ne 0) { return $false }
+
+    # Brief wait and re-check
+    Start-Sleep -Seconds 2
+    $raw2 = & manage-bde -protectors -get "${Drive}:" 2>$null
+    return ($raw2 -match 'Numerical\s*Password' -or $raw2 -match '^\s*Password:\s*[0-9\- ]{20,}')
+  } catch {
+    return $false
+  }
+}
+
 function Invoke-BackupToAD {
   param([string]$Drive, [string]$ProtectorId)
   try {
@@ -149,6 +169,18 @@ try {
   foreach ($dl in $fixed) {
     $dl = $dl.ToString()
     $items = Get-RecoveryPasswordsFromManageBde -Drive $dl
+
+    # If no recovery password protectors found, attempt to add one and re-enumerate
+    if ($null -eq $items -or (@($items).Count -eq 0)) {
+      if (Ensure-RecoveryPassword -Drive $dl) {
+        Start-Sleep -Seconds 2
+        $items = Get-RecoveryPasswordsFromManageBde -Drive $dl
+      } else {
+        $errors += "No recovery password present and failed to add one on $dl"
+        $items = @()  # ensure array
+      }
+    }
+
     if ($null -eq $items) { $items = @() }
     $items = @($items)
     $drivesOut["$dl"] = [ordered]@{ HasKeys = [bool]($items.Count -gt 0); RecoveryPasswords = $items }
