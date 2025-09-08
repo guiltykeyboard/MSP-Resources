@@ -1,172 +1,190 @@
-#Requires -RunAsAdministrator
 #Requires -Version 5.1
-<#
+<#!
 .SYNOPSIS
-  Backup and inventory BitLocker recovery keys on this device.
+  Inventory BitLocker recovery passwords for fixed drives and escrow them to AD/Azure AD when joined.
 .DESCRIPTION
-  Designed for ConnectWise RMM (Asio) but runs standalone. Emits a compact JSON object (and a table)
-  by default for RMM ingestion; optional file exports with -WriteFiles.
-.PARAMETERS
-  -WriteFiles          Write TXT/CSV/JSON artifacts to disk (opt-in)
-  -OutputRoot <path>   Folder to write artifacts when -WriteFiles is used
-  -AttemptADBackup     If domain-joined, attempt AD DS backup of each recovery protector
-  -Quiet               JSON-only output (no table/log lines)
-.EXITCODES
-  0 success; 2 no recovery passwords found; 1 error
+  Designed for CW RMM (ConnectWise RMM - Asio). Runs correctly as SYSTEM. No local files are created and
+  the ONLY output is a compact JSON document to STDOUT, suitable for storing in a device-level custom field.
+
+  Behavior:
+    • Enumerates FIXED (non‑removable) volumes.
+    • Collects Recovery Password protectors (48‑digit) per drive using manage-bde parsing for reliability.
+    • If the device is domain‑joined, attempts on‑prem AD escrow via `manage-bde -protectors -adbackup`.
+    • If the device is Azure AD/Entra ID joined and `BackupToAAD-BitLockerKeyProtector` is available,
+      attempts AAD escrow for each protector.
+
+  Mixed scenarios: the script can self‑elevate when not already elevated unless -NoElevate is provided.
+
+.PARAMETER NoElevate
+  Skip self‑elevation if not already elevated (useful for interactive testing). RMM as SYSTEM is already elevated.
+
+.PARAMETER HumanReadable
+  Switch to output a human‑friendly table/list instead of JSON (intended for interactive testing).
+
+.OUTPUTS
+  JSON on STDOUT with keys: Device, KeyCount, Drives, Backups, and optionally Errors.
+
+.EXAMPLE
+  powershell.exe -ExecutionPolicy Bypass -File .\backupBitlockerKeys.ps1 -NoElevate
 #>
+
+[CmdletBinding()]
+param(
+  [switch]$NoElevate,
+  [switch]$HumanReadable
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-param(
-  [switch]$WriteFiles,                 # Opt-in: write TXT/CSV/JSON to disk
-  [string]$OutputRoot = 'C:\ProgramData\CW-RMM\BitLocker',
-  [switch]$AttemptADBackup,            # If domain-joined, call Backup-BitLockerKeyProtector
-  [switch]$Quiet                       # If set, emit JSON only
-)
-
-function Write-Log {
-  param([string]$Message, [string]$Level = 'INFO')
-  $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-  Write-Host "[$ts][$Level] $Message"
+function Test-IsElevated {
+  try { return ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator) }
+  catch { return $false }
 }
 
-try {
-  $hostname   = $env:COMPUTERNAME
-  $serial     = (Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue).SerialNumber
-  if (-not $serial) { $serial = (Get-CimInstance Win32_ComputerSystemProduct -ErrorAction SilentlyContinue).IdentifyingNumber }
+# Elevate in mixed scenarios (CW RMM as SYSTEM is already elevated)
+if (-not $NoElevate -and -not (Test-IsElevated)) {
+  try {
+    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    exit 0
+  } catch { }
+}
 
-  if (-not (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue)) {
-    throw 'Get-BitLockerVolume cmdlet not found. This Windows edition may not include BitLocker tools.'
-  }
-
-  $volumes = Get-BitLockerVolume | Where-Object { $_.VolumeType -in 'OperatingSystem','Data' }
-
-  $rows = @()
-  $anyRecovery = $false
-
-  foreach ($vol in $volumes) {
-    $mp      = $vol.MountPoint
-    $enc     = $vol.EncryptionPercentage
-    $volType = $vol.VolumeType
-    $kps     = $vol.KeyProtector
-
-    $recKPs = @()
-    if ($kps) { $recKPs = $kps | Where-Object { $_.KeyProtectorType -in 'RecoveryPassword','NumericalPassword' } }
-    if ($recKPs.Count -gt 0) { $anyRecovery = $true }
-
-    if ($recKPs.Count -eq 0) {
-      $rows += [pscustomobject]@{
-        ComputerName       = $hostname
-        SerialNumber       = $serial
-        VolumeType         = $volType
-        MountPoint         = $mp
-        ProtectionStatus   = $vol.ProtectionStatus
-        EncryptionPercent  = $enc
-        KeyProtectorType   = $null
-        RecoveryKeyId      = $null
-        RecoveryPassword   = $null
-        BackedUpToAD       = $false
-        Timestamp          = (Get-Date)
-      }
-      continue
-    }
-
-    foreach ($kp in $recKPs) {
-      $recoveryId  = $kp.KeyProtectorId
-      $recoveryPwd = $null
-
-      # Extract recovery password via manage-bde for reliability across builds
-      try {
-        $mbde = manage-bde -protectors -get $mp 2>$null
-        $inBlock = $false
-        foreach ($line in $mbde) {
-          if ($line -match 'ID:\s*\{?'+[regex]::Escape($recoveryId)+'\}?') { $inBlock = $true; continue }
-          if ($inBlock -and $line -match 'Password:\s*(?<pwd>[0-9\- ]{20,})') {
-            $recoveryPwd = ($Matches['pwd'] -replace '\s','').Trim()
-            break
-          }
-          if ($inBlock -and [string]::IsNullOrWhiteSpace($line)) { break }
-        }
-      } catch { }
-
-      if (-not $recoveryPwd -and $kp.NumericalPassword) { $recoveryPwd = ($kp.NumericalPassword -replace '\s','').Trim() }
-
-      $backedUp = $false
-      if ($AttemptADBackup.IsPresent) {
-        try {
-          $cs = Get-CimInstance Win32_ComputerSystem
-          if ($cs.PartOfDomain) {
-            Write-Log "Attempting AD DS backup for $mp protector $recoveryId..."
-            Backup-BitLockerKeyProtector -MountPoint $mp -KeyProtectorId $recoveryId -ErrorAction Stop | Out-Null
-            $backedUp = $true
-          } else {
-            Write-Log 'Machine is not domain-joined; skipping AD backup.' 'WARN'
-          }
-        } catch {
-          Write-Log "AD backup attempt failed for $mp protector $recoveryId: $($_.Exception.Message)" 'WARN'
-        }
-      }
-
-      $rows += [pscustomobject]@{
-        ComputerName       = $hostname
-        SerialNumber       = $serial
-        VolumeType         = $volType
-        MountPoint         = $mp
-        ProtectionStatus   = $vol.ProtectionStatus
-        EncryptionPercent  = $enc
-        KeyProtectorType   = $kp.KeyProtectorType
-        RecoveryKeyId      = $recoveryId
-        RecoveryPassword   = $recoveryPwd
-        BackedUpToAD       = $backedUp
-        Timestamp          = (Get-Date)
-      }
-    }
-  }
-
-  $summary = [pscustomobject]@{
-    ComputerName = $hostname
-    SerialNumber = $serial
-    AnyRecovery  = [bool]$anyRecovery
-    Count        = $rows.Count
-    Timestamp    = Get-Date
-    Rows         = $rows
-  }
-
-  if ($Quiet) {
-    $summary | ConvertTo-Json -Depth 6 -Compress | Write-Output
-  } else {
-    Write-Host '==== BitLocker Recovery Summary (table) ===='
-    $rows | Select-Object ComputerName,MountPoint,KeyProtectorType,RecoveryKeyId,RecoveryPassword,BackedUpToAD |
-      Format-Table -AutoSize | Out-String | Write-Host
-    Write-Host '==== BitLocker Recovery Summary (json) ===='
-    $summary | ConvertTo-Json -Depth 6 -Compress | Write-Output
-  }
-
-  if ($WriteFiles) {
+function Get-FixedDriveLetters {
+  $letters = @()
+  try {
+    $letters = Get-Volume -ErrorAction Stop |
+      Where-Object { $_.DriveType -eq 'Fixed' -and $_.DriveLetter } |
+      Select-Object -ExpandProperty DriveLetter
+  } catch {
     try {
-      if (-not (Test-Path -LiteralPath $OutputRoot)) { New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null }
-      $timestamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
-      $txtPath  = Join-Path $OutputRoot "${hostname}_${timestamp}_BitLocker.txt"
-      $csvPath  = Join-Path $OutputRoot "${hostname}_${timestamp}_BitLocker.csv"
-      $jsonPath = Join-Path $OutputRoot "${hostname}_${timestamp}_BitLocker.json"
+      $letters = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" |
+        Where-Object { $_.DeviceID -match ':' } |
+        ForEach-Object { $_.DeviceID.Substring(0,1) }
+    } catch {}
+  }
+  return @($letters | Sort-Object -Unique)
+}
 
-      $rows | Sort-Object MountPoint, KeyProtectorType | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
-      $rows | ConvertTo-Json -Depth 6 | Out-File -FilePath $jsonPath -Encoding UTF8
-      ($rows | Select-Object ComputerName,MountPoint,KeyProtectorType,RecoveryKeyId,RecoveryPassword,BackedUpToAD |
-        Format-Table -AutoSize | Out-String) | Out-File -FilePath $txtPath -Encoding UTF8
+function Get-DeviceJoinState {
+  $domainJoined = $false
+  $azureAdJoined = $false
+  try {
+    $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+    $domainJoined = [bool]$cs.PartOfDomain
+  } catch {}
+  try {
+    $ds = & dsregcmd.exe /status 2>$null
+    if ($ds) { $azureAdJoined = ($ds -match "AzureAdJoined\s*:\s*YES") }
+  } catch {}
+  [pscustomobject]@{ DomainJoined = $domainJoined; AzureAdJoined = $azureAdJoined }
+}
 
-      Write-Log "Wrote: $csvPath"
-      Write-Log "Wrote: $jsonPath"
-      Write-Log "Wrote: $txtPath"
-    } catch {
-      Write-Log "Optional file export failed: $($_.Exception.Message)" 'WARN'
+function Get-RecoveryPasswordsFromManageBde {
+  param([Parameter(Mandatory)][ValidatePattern('^[A-Fa-f]$')] [string]$Drive)
+  $present = Test-Path ("${Drive}:")
+  if (-not $present) { return @() }
+  try {
+    $raw = & manage-bde -protectors -get "${Drive}:" 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { return @() }
+    # Parse blocks that contain ID and Password lines
+    $items = @()
+    $current = $null
+    foreach ($line in $raw) {
+      if ($line -match '^\s*ID:\s*\{([0-9A-Fa-f-]{36})\}') {
+        $id = $Matches[1]
+        $current = [ordered]@{ Id = "{$id}"; Password = $null }
+      } elseif ($line -match '^\s*Password:\s*([0-9\- ]{20,})') {
+        if ($current -ne $null) {
+          $pwd = ($Matches[1] -replace '\s','').Trim()
+          $current.Password = $pwd
+          $items += [pscustomobject]$current
+          $current = $null
+        }
+      }
+    }
+    return $items
+  } catch { return @() }
+}
+
+function Ensure-BackupToAD {
+  param([string]$Drive, [string]$ProtectorId)
+  try {
+    $null = & manage-bde -protectors -adbackup "${Drive}:" -id $ProtectorId 2>$null
+    return ($LASTEXITCODE -eq 0)
+  } catch { return $false }
+}
+
+function Ensure-BackupToAAD {
+  param([string]$Drive, [string]$ProtectorId)
+  $cmd = Get-Command BackupToAAD-BitLockerKeyProtector -ErrorAction SilentlyContinue
+  if (-not $cmd) { return $false }
+  try {
+    BackupToAAD-BitLockerKeyProtector -MountPoint "${Drive}:" -KeyProtectorId $ProtectorId -ErrorAction Stop | Out-Null
+    return $true
+  } catch { return $false }
+}
+
+# --- main ---
+$errors = @()
+try {
+  $fixed = Get-FixedDriveLetters
+  $join  = Get-DeviceJoinState
+
+  $drivesOut = @{}
+  $adAttempted = $false; $adSuccess = 0
+  $aadAttempted = $false; $aadSuccess = 0
+
+  foreach ($dl in $fixed) {
+    $items = Get-RecoveryPasswordsFromManageBde -Drive $dl
+    $drivesOut[$dl] = [ordered]@{ HasKeys = [bool]($items.Count -gt 0); RecoveryPasswords = @($items) }
+
+    foreach ($it in $items) {
+      if ($join.DomainJoined) {
+        $adAttempted = $true
+        if (Ensure-BackupToAD -Drive $dl -ProtectorId $it.Id) { $adSuccess++ } else { $errors += "AD escrow failed for $dl $($it.Id)" }
+      }
+      if ($join.AzureAdJoined) {
+        $aadAttempted = $true
+        if (Ensure-BackupToAAD -Drive $dl -ProtectorId $it.Id) { $aadSuccess++ } else { $errors += "AAD escrow failed for $dl $($it.Id)" }
+      }
     }
   }
 
-  if ($rows.Count -eq 0 -or -not $anyRecovery) { exit 2 } else { exit 0 }
+  $keyCount = ($drivesOut.GetEnumerator() | ForEach-Object { $_.Value.RecoveryPasswords.Count } | Measure-Object -Sum).Sum
+
+  $payload = [ordered]@{
+    Device  = [ordered]@{ DomainJoined = [bool]$join.DomainJoined; AzureAdJoined = [bool]$join.AzureAdJoined }
+    KeyCount = [int]$keyCount
+    Drives  = $drivesOut
+    Backups = [ordered]@{
+      ActiveDirectory = [ordered]@{ Attempted = [bool]$adAttempted; Succeeded = [int]$adSuccess }
+      AzureAD         = [ordered]@{ Attempted = [bool]$aadAttempted; Succeeded = [int]$aadSuccess }
+    }
+  }
+  if ($errors.Count -gt 0) { $payload.Errors = @($errors) }
+
+  if ($HumanReadable) {
+    "Device:"
+    $payload.Device | Format-List | Out-String | Write-Output
+
+    "Backups:"
+    $payload.Backups | Format-List | Out-String | Write-Output
+
+    "Drives:"
+    $payload.Drives.GetEnumerator() | ForEach-Object {
+      "Drive: {0}" -f $_.Key
+      $_.Value | Format-List | Out-String | Write-Output
+    }
+  }
+  else {
+    $payload | ConvertTo-Json -Depth 6 -Compress | Write-Output
+  }
 }
 catch {
-  Write-Log "ERROR: $($_.Exception.Message)" 'ERROR'
-  exit 1
+  $errPayload = [ordered]@{ Error = $_.Exception.Message }
+  $errPayload | ConvertTo-Json -Depth 3 -Compress | Write-Output
 }
+
+# Always succeed so the field captures output; rely on content to signal errors
+exit 0
