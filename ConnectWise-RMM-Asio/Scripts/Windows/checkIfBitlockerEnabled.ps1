@@ -71,14 +71,31 @@ function Get-BitLockerEnabledMap {
   $blCmd = Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue
   if ($blCmd) {
     $vols = Get-BitLockerVolume -ErrorAction SilentlyContinue
+
+    # Build a lookup by drive letter (normalize MountPoint: "C:" or "C:\" -> "C")
+    $volsByLetter = @{}
+    foreach ($v in $vols) {
+      $mp = $null
+      try { $mp = ($v.MountPoint).ToString() } catch { $mp = $null }
+      if ($mp) {
+        $mp = $mp.TrimEnd('\')
+        if ($mp.Length -ge 2 -and $mp[1] -eq ':') {
+          $letter = $mp.Substring(0,1).ToUpper()
+          if ($letter -match '^[A-Z]$') { $volsByLetter[$letter] = $v }
+        }
+      }
+    }
+
     foreach ($dl in $DriveLetters) {
       $present = Test-Path ("${dl}:\")
       $enabled = $false
       if ($present) {
-        $v = $vols | Where-Object { $_.MountPoint -eq "${dl}:\\" }
+        $v = $volsByLetter[$dl.ToUpper()]
         if ($null -ne $v) {
+          # ProtectionStatus is an enum; ToString() yields 'On' when protected
           $enabled = ($v.ProtectionStatus.ToString() -eq 'On')
         } else {
+          # Fallback to manage-bde parsing if not found in the lookup
           $enabled = (Get-ManageBdeEnabled -Drive $dl)
         }
       }
@@ -99,7 +116,7 @@ function Get-ManageBdeEnabled {
   try {
     $raw = & manage-bde -status "${Drive}:\\" 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $raw) { return $false }
-    $prot = ($raw | Select-String -Pattern 'Protection Status:\s*(.*)' -AllMatches | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() } | Select-Object -First 1)
+    $prot = ($raw | Select-String -Pattern 'Protection\s*Status\s*:\s*(.*)' -AllMatches | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() } | Select-Object -First 1)
     return ($prot -match 'On')
   } catch { return $false }
 }
@@ -110,6 +127,6 @@ $bitlockerMap = Get-BitLockerEnabledMap -DriveLetters $fixedLetters
 $anyEnabledFixed = $null -ne ($bitlockerMap.Values | Where-Object { $_ }) -and (($bitlockerMap.Values | Where-Object { $_ }).Count -gt 0)
 
 # Emit a single, parseable marker line (some RMM UIs display only the last line)
-Write-Output ("BITLOCKER_FIXED_ENABLED={0}" -f ([int]$anyEnabledFixed))
+Write-Output ([int]$anyEnabledFixed)
 
 exit 0
