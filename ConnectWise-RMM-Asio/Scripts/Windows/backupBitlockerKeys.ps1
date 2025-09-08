@@ -1,33 +1,3 @@
-#Requires -Version 5.1
-<#!
-.SYNOPSIS
-  Inventory BitLocker recovery passwords for fixed drives and escrow them to AD/Azure AD when joined.
-.DESCRIPTION
-  Designed for CW RMM (ConnectWise RMM - Asio). Runs correctly as SYSTEM. No local files are created and
-  the ONLY output is a compact JSON document to STDOUT, suitable for storing in a device-level custom field.
-
-  Behavior:
-    • Enumerates FIXED (non‑removable) volumes.
-    • Collects Recovery Password protectors (48‑digit) per drive using manage-bde parsing for reliability.
-    • If the device is domain‑joined, attempts on‑prem AD escrow via `manage-bde -protectors -adbackup`.
-    • If the device is Azure AD/Entra ID joined and `BackupToAAD-BitLockerKeyProtector` is available,
-      attempts AAD escrow for each protector.
-
-  Mixed scenarios: the script can self‑elevate when not already elevated unless -NoElevate is provided.
-
-.PARAMETER NoElevate
-  Skip self‑elevation if not already elevated (useful for interactive testing). RMM as SYSTEM is already elevated.
-
-.PARAMETER HumanReadable
-  Switch to output a human‑friendly table/list instead of JSON (intended for interactive testing).
-
-.OUTPUTS
-  JSON on STDOUT with keys: Device, KeyCount, Drives, Backups, and optionally Errors.
-
-.EXAMPLE
-  powershell.exe -ExecutionPolicy Bypass -File .\backupBitlockerKeys.ps1 -NoElevate
-#>
-
 [CmdletBinding()]
 param(
   [switch]$NoElevate,
@@ -37,33 +7,97 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Test-IsElevated {
-  try { return ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator) }
-  catch { return $false }
+function Get-RecoveryPasswordsFromManageBde {
+  param([Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')] [string]$Drive)
+  $present = Test-Path ("${Drive}:")
+  if (-not $present) { return @() }
+  try {
+    $raw = & manage-bde -protectors -get "${Drive}:" 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { return @() }
+
+    $items = @()
+    $current = $null
+    $expectPwdNext = $false
+
+    foreach ($line in $raw) {
+      if ($line -match '^\s*ID:\s*\{([0-9A-Fa-f-]{36})\}') {
+        $id = $Matches[1]
+        $current = [ordered]@{ Id = "{$id}"; Password = $null }
+        $expectPwdNext = $false
+        continue
+      }
+
+      # Case 1: password value appears on the same line as the label
+      if ($line -match '^\s*Password\s*:\s*([0-9\- ]{20,})\s*$') {
+        if ($null -ne $current) {
+          $RecoveryPwd = ($Matches[1] -replace '\s','').Trim()
+          $current.Password = $RecoveryPwd
+          $items += [pscustomobject]$current
+          $current = $null
+        }
+        $expectPwdNext = $false
+        continue
+      }
+
+      # Case 2: a bare label line; the next line should contain the digits
+      if ($line -match '^\s*Password\s*:\s*$') {
+        $expectPwdNext = $true
+        continue
+      }
+
+      if ($expectPwdNext -and $line -match '^\s*([0-9\- ]{20,})\s*$') {
+        if ($null -ne $current) {
+          $RecoveryPwd = ($Matches[1] -replace '\s','').Trim()
+          $current.Password = $RecoveryPwd
+          $items += [pscustomobject]$current
+          $current = $null
+        }
+        $expectPwdNext = $false
+        continue
+      }
+    }
+
+    return $items
+  } catch { return @() }
 }
 
-# Elevate in mixed scenarios (CW RMM as SYSTEM is already elevated)
-if (-not $NoElevate -and -not (Test-IsElevated)) {
+function Add-RecoveryPasswordProtector {
+  param([Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')] [string]$Drive)
   try {
-    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
-    exit 0
-  } catch { }
+    # If a numerical/recovery password already exists, we're done
+    $raw = & manage-bde -protectors -get "${Drive}:" 2>$null
+    if ($raw -match 'Numerical\s*Password' -or $raw -match '^\s*Password\s*:' ) { return $true }
+
+    # Add a recovery password protector (capture stderr/exit for diagnostics)
+    $errText = (& manage-bde -protectors -add "${Drive}:" -rp 2>&1 | Out-String)
+    $script:AddRPDiag["$Drive"] = @{ Exit = $LASTEXITCODE; Stderr = ($errText.Trim()) }
+    if ($LASTEXITCODE -ne 0) { return $false }
+
+    # Brief wait and re-check
+    Start-Sleep -Seconds 2
+    $raw2 = & manage-bde -protectors -get "${Drive}:" 2>$null
+    return ($raw2 -match 'Numerical\s*Password' -or $raw2 -match '^\s*Password\s*:')
+  } catch {
+    return $false
+  }
 }
+
+if (-not $script:AddRPDiag) { $script:AddRPDiag = @{} }
 
 function Get-FixedDriveLetters {
   $letters = @()
   try {
     $letters = Get-Volume -ErrorAction Stop |
       Where-Object { $_.DriveType -eq 'Fixed' -and $_.DriveLetter } |
-      ForEach-Object { $_.DriveLetter.ToString() }
+      ForEach-Object { $_.DriveLetter.ToString().ToUpper() }
   } catch {
     try {
       $letters = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" |
         Where-Object { $_.DeviceID -match ':' } |
-        ForEach-Object { ($_.DeviceID.Substring(0,1)).ToString() }
+        ForEach-Object { ($_.DeviceID.Substring(0,1)).ToString().ToUpper() }
     } catch {}
   }
-  return @($letters | ForEach-Object { $_.ToString().ToUpper() } | Sort-Object -Unique)
+  return @($letters | Sort-Object -Unique)
 }
 
 function Get-DeviceJoinState {
@@ -80,55 +114,8 @@ function Get-DeviceJoinState {
   [pscustomobject]@{ DomainJoined = $domainJoined; AzureAdJoined = $azureAdJoined }
 }
 
-function Get-RecoveryPasswordsFromManageBde {
-  param([Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')] [string]$Drive)
-  $present = Test-Path ("${Drive}:")
-  if (-not $present) { return @() }
-  try {
-    $raw = & manage-bde -protectors -get "${Drive}:" 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $raw) { return @() }
-    # Parse blocks that contain ID and Password lines
-    $items = @()
-    $current = $null
-    foreach ($line in $raw) {
-      if ($line -match '^\s*ID:\s*\{([0-9A-Fa-f-]{36})\}') {
-        $id = $Matches[1]
-        $current = [ordered]@{ Id = "{$id}"; Password = $null }
-      } elseif ($line -match '^\s*Password:\s*([0-9\- ]{20,})') {
-        if ($null -ne $current) {
-          $recoveryPwd = ($Matches[1] -replace '\s','').Trim()
-          $current.Password = $recoveryPwd
-          $items += [pscustomobject]$current
-          $current = $null
-        }
-      }
-    }
-    return $items
-  } catch { return @() }
-}
-
-function Add-RecoveryPasswordProtector {
-  param([Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')] [string]$Drive)
-  try {
-    # If a numerical/recovery password already exists, we're done
-    $raw = & manage-bde -protectors -get "${Drive}:" 2>$null
-    if ($raw -match 'Numerical\s*Password' -or $raw -match '^\s*Password:\s*[0-9\- ]{20,}') { return $true }
-
-    # Add a recovery password protector
-    $null = & manage-bde -protectors -add "${Drive}:" -rp 2>$null
-    if ($LASTEXITCODE -ne 0) { return $false }
-
-    # Brief wait and re-check
-    Start-Sleep -Seconds 2
-    $raw2 = & manage-bde -protectors -get "${Drive}:" 2>$null
-    return ($raw2 -match 'Numerical\s*Password' -or $raw2 -match '^\s*Password:\s*[0-9\- ]{20,}')
-  } catch {
-    return $false
-  }
-}
-
 function Invoke-BackupToAD {
-  param([string]$Drive, [string]$ProtectorId)
+  param([Parameter(Mandatory)][string]$Drive, [Parameter(Mandatory)][string]$ProtectorId)
   try {
     $null = & manage-bde -protectors -adbackup "${Drive}:" -id $ProtectorId 2>$null
     return ($LASTEXITCODE -eq 0)
@@ -136,7 +123,7 @@ function Invoke-BackupToAD {
 }
 
 function Invoke-BackupToAAD {
-  param([string]$Drive, [string]$ProtectorId)
+  param([Parameter(Mandatory)][string]$Drive, [Parameter(Mandatory)][string]$ProtectorId)
   $cmd = Get-Command BackupToAAD-BitLockerKeyProtector -ErrorAction SilentlyContinue
   if (-not $cmd) { return $false }
   try {
@@ -144,19 +131,18 @@ function Invoke-BackupToAAD {
     return $true
   } catch { return $false }
 }
-# Use approved verbs per PowerShell guidelines:
-# - "Invoke" for actions (was: Ensure-BackupToAAD, Use-BackupToAAD)
-# All function names above now use approved verbs.
-function Invoke-BackupToAAD {
-  param([string]$Drive, [string]$ProtectorId)
-  $cmd = Get-Command BackupToAAD-BitLockerKeyProtector -ErrorAction SilentlyContinue
-  if (-not $cmd) { return $false }
-  try {
-    BackupToAAD-BitLockerKeyProtector -MountPoint "${Drive}:" -KeyProtectorId $ProtectorId -ErrorAction Stop | Out-Null
-    return $true
-  } catch { return $false }
-}
+
 # --- main ---
+
+function Test-IsElevated {
+  try { return ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator) }
+  catch { return $false }
+}
+
+if (-not $NoElevate -and -not (Test-IsElevated)) {
+  try { Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -NoElevate" -Verb RunAs; exit 0 } catch {}
+}
+
 $errors = @()
 try {
   $fixed = Get-FixedDriveLetters
@@ -169,15 +155,23 @@ try {
   foreach ($dl in $fixed) {
     $dl = $dl.ToString()
     $items = Get-RecoveryPasswordsFromManageBde -Drive $dl
-
-    # If no recovery password protectors found, attempt to add one and re-enumerate
     if ($null -eq $items -or (@($items).Count -eq 0)) {
       if (Add-RecoveryPasswordProtector -Drive $dl) {
         Start-Sleep -Seconds 2
         $items = Get-RecoveryPasswordsFromManageBde -Drive $dl
       } else {
-        $errors += "No recovery password present and failed to add one on $dl"
-        $items = @()  # ensure array
+        $diag = $script:AddRPDiag["$dl"]
+        $code = if ($diag) { $diag.Exit } else { $null }
+        $stderr = if ($diag) { $diag.Stderr } else { $null }
+        $hint = $null
+        if ($stderr -match '0x8031005A' -or $stderr -match 'FVE_E_POLICY_RECOVERY_PASSWORD_NOT_ALLOWED') { $hint = 'Policy blocks numerical recovery passwords (GPO/Intune). Enable numerical recovery or allow key escrow.' }
+        elseif ($stderr -match '0x80310059' -or $stderr -match 'FVE_E_POLICY_USER_CONFIGURE_RECOVERY') { $hint = 'Policy forbids user-configured recovery. Configure recovery policy to allow creation/escrow.' }
+        elseif ($stderr -match '0x80310054' -or $stderr -match 'FVE_E_LOCKED_VOLUME') { $hint = 'Volume locked/busy. Retry after reboot or ensure volume is accessible.' }
+        $msg = "Add recovery password failed on $dl" + ($(if ($null -ne $code) { " (exit=$code)" } else { '' }))
+        if ($hint) { $msg += ". Hint: $hint" }
+        if ($stderr) { $msg += " STDERR: $stderr" }
+        $errors += $msg
+        $items = @()
       }
     }
 
@@ -186,14 +180,8 @@ try {
     $drivesOut["$dl"] = [ordered]@{ HasKeys = [bool]($items.Count -gt 0); RecoveryPasswords = $items }
 
     foreach ($it in $items) {
-      if ($join.DomainJoined) {
-        $adAttempted = $true
-        if (Invoke-BackupToAD -Drive $dl -ProtectorId $it.Id) { $adSuccess++ } else { $errors += "AD escrow failed for $dl $($it.Id)" }
-      }
-      if ($join.AzureAdJoined) {
-        $aadAttempted = $true
-        if (Invoke-BackupToAAD -Drive $dl -ProtectorId $it.Id) { $aadSuccess++ } else { $errors += "AAD escrow failed for $dl $($it.Id)" }
-      }
+      if ($join.DomainJoined) { $adAttempted = $true; if (Invoke-BackupToAD -Drive $dl -ProtectorId $it.Id) { $adSuccess++ } else { $errors += "AD escrow failed for $dl $($it.Id)" } }
+      if ($join.AzureAdJoined) { $aadAttempted = $true; if (Invoke-BackupToAAD -Drive $dl -ProtectorId $it.Id) { $aadSuccess++ } else { $errors += "AAD escrow failed for $dl $($it.Id)" } }
     }
   }
 
@@ -215,39 +203,17 @@ try {
   }
   if ($errors.Count -gt 0) { $payload.Errors = @($errors) }
 
-  # Build compact JSON of the core payload (no _meta yet)
   $coreJson = $payload | ConvertTo-Json -Depth 6 -Compress
-
-  # Compute SHA256 of the core JSON to help verify integrity/length in RMM
-  $sha256 = [System.BitConverter]::ToString(
-                ([System.Security.Cryptography.SHA256]::Create()).ComputeHash(
-                    [System.Text.Encoding]::UTF8.GetBytes($coreJson)
-                )
-            ).Replace('-', '').ToLowerInvariant()
+  $sha256 = [System.BitConverter]::ToString(( [System.Security.Cryptography.SHA256]::Create()).ComputeHash([System.Text.Encoding]::UTF8.GetBytes($coreJson))).Replace('-', '').ToLowerInvariant()
   $chars = $coreJson.Length
-
-  # Attach meta (will be included only in the JSON output branch)
   $payload._meta = [ordered]@{ sha256 = $sha256; chars = $chars }
-
-  # Final JSON (core fields + _meta)
   $finalJson = $payload | ConvertTo-Json -Depth 6 -Compress
 
   if ($HumanReadable) {
-    "System Info:"
-    $payload.Device | Format-List | Out-String | Write-Output
-
-    "Escrow Status:"
-    $payload.Backups | Format-List | Out-String | Write-Output
-
-    "Drives:"
-    $payload.Drives.GetEnumerator() | ForEach-Object {
-      $k = ($_.Key).ToString()
-      "Drive: {0}" -f $k
-      $_.Value | Format-List | Out-String | Write-Output
-    }
-  }
-  else {
-    # Emit the JSON with _meta so you can verify truncation/integrity in RMM
+    "System Info:"; $payload.Device | Format-List | Out-String | Write-Output
+    "Escrow Status:"; $payload.Backups | Format-List | Out-String | Write-Output
+    "Drives:"; $payload.Drives.GetEnumerator() | ForEach-Object { $k = ($_.Key).ToString(); "Drive: {0}" -f $k; $_.Value | Format-List | Out-String | Write-Output }
+  } else {
     Write-Output $finalJson
   }
 }
@@ -256,5 +222,4 @@ catch {
   exit 1
 }
 
-# Success
 exit 0
