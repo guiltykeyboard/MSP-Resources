@@ -107,7 +107,7 @@ function Get-RecoveryPasswordsFromManageBde {
   } catch { return @() }
 }
 
-function Ensure-RecoveryPassword {
+function Add-RecoveryPasswordProtector {
   param([Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')] [string]$Drive)
   try {
     # If a numerical/recovery password already exists, we're done
@@ -172,7 +172,7 @@ try {
 
     # If no recovery password protectors found, attempt to add one and re-enumerate
     if ($null -eq $items -or (@($items).Count -eq 0)) {
-      if (Ensure-RecoveryPassword -Drive $dl) {
+      if (Add-RecoveryPasswordProtector -Drive $dl) {
         Start-Sleep -Seconds 2
         $items = Get-RecoveryPasswordsFromManageBde -Drive $dl
       } else {
