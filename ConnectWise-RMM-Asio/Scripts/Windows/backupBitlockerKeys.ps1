@@ -55,15 +55,15 @@ function Get-FixedDriveLetters {
   try {
     $letters = Get-Volume -ErrorAction Stop |
       Where-Object { $_.DriveType -eq 'Fixed' -and $_.DriveLetter } |
-      Select-Object -ExpandProperty DriveLetter
+      ForEach-Object { $_.DriveLetter.ToString() }
   } catch {
     try {
       $letters = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" |
         Where-Object { $_.DeviceID -match ':' } |
-        ForEach-Object { $_.DeviceID.Substring(0,1) }
+        ForEach-Object { ($_.DeviceID.Substring(0,1)).ToString() }
     } catch {}
   }
-  return @($letters | Sort-Object -Unique)
+  return @($letters | ForEach-Object { $_.ToString().ToUpper() } | Sort-Object -Unique)
 }
 
 function Get-DeviceJoinState {
@@ -147,10 +147,11 @@ try {
   $aadAttempted = $false; $aadSuccess = 0
 
   foreach ($dl in $fixed) {
+    $dl = $dl.ToString()
     $items = Get-RecoveryPasswordsFromManageBde -Drive $dl
     if ($null -eq $items) { $items = @() }
     $items = @($items)
-    $drivesOut[$dl] = [ordered]@{ HasKeys = [bool]($items.Count -gt 0); RecoveryPasswords = $items }
+    $drivesOut["$dl"] = [ordered]@{ HasKeys = [bool]($items.Count -gt 0); RecoveryPasswords = $items }
 
     foreach ($it in $items) {
       if ($join.DomainJoined) {
@@ -208,7 +209,8 @@ try {
 
     "Drives:"
     $payload.Drives.GetEnumerator() | ForEach-Object {
-      "Drive: {0}" -f $_.Key
+      $k = ($_.Key).ToString()
+      "Drive: {0}" -f $k
       $_.Value | Format-List | Out-String | Write-Output
     }
   }
