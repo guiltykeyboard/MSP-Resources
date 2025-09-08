@@ -64,6 +64,10 @@ function Get-RecoveryPasswordsFromManageBde {
 function Add-RecoveryPasswordProtector {
   param([Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')] [string]$Drive)
   try {
+    # Ensure diagnostics map exists in script scope (StrictMode-safe)
+    if (-not (Get-Variable -Name 'AddRPDiag' -Scope Script -ErrorAction SilentlyContinue)) {
+      Set-Variable -Name 'AddRPDiag' -Scope Script -Value @{}
+    }
     # If a numerical/recovery password already exists, we're done
     $raw = & manage-bde -protectors -get "${Drive}:" 2>$null
     if ($raw -match 'Numerical\s*Password' -or $raw -match '^\s*Password\s*:' ) { return $true }
