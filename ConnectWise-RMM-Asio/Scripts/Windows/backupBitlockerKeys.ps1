@@ -1,3 +1,46 @@
+<#PSScriptInfo
+.VERSION 1.0.0
+.GUID 0f7e9f9e-2c2b-4b1a-8f7e-6f6f3e1b8a3a
+.AUTHOR iTech MSP (Michael Stoffel)
+.COMPANYNAME iTech
+.COPYRIGHT (c) iTech. All rights reserved.
+.TAGS BitLocker, KeyBackup, RMM, AD, AAD, EntraID
+.LICENSEURI https://opensource.org/licenses/MIT
+.PROJECTURI https://github.com/guiltykeyboard/MSP-Resources
+#>
+
+<#
+.SYNOPSIS
+Backs up BitLocker recovery keys on all fixed drives, creating a recovery password protector if missing, and escrows keys to AD or Entra ID (AAD). Emits a single-line JSON payload for RMM.
+
+.DESCRIPTION
+This script enumerates all fixed volumes, ensures a Recovery Password protector exists, captures the 48‑digit recovery passwords, and attempts escrow to:
+ - Active Directory (manage-bde -protectors -adbackup)
+ - Entra ID / Azure AD (BackupToAAD-BitLockerKeyProtector), when available
+It prints a compact JSON string with device join state, per‑drive key details, escrow attempt counts, and a small _meta block. When -HumanReadable is used, a readable table is written instead of JSON.
+
+.PARAMETER NoElevate
+Prevents self‑elevation. Use when the caller already runs as Administrator (e.g., RMM agents running as SYSTEM).
+
+.PARAMETER HumanReadable
+Writes a human‑readable summary instead of JSON. Intended for diagnostics; disable in automations that parse the JSON.
+
+.OUTPUTS
+System.String
+A single-line JSON object on success (default). On error, a non‑JSON message is written to stderr and the script exits with code 1.
+
+.EXAMPLE
+PS> powershell.exe -ExecutionPolicy Bypass -File .\backupBitlockerKeys.ps1 -NoElevate
+Runs without self‑elevating and emits JSON suitable for capture by RMM custom fields.
+
+.EXAMPLE
+PS> .\backupBitlockerKeys.ps1 -HumanReadable
+Shows a readable summary of join state, escrow status, and any discovered recovery passwords.
+
+.NOTES
+Requires PowerShell 5.1+ and BitLocker/management tools. Approved verbs are used for public functions. The script avoids writing files locally and is StrictMode‑safe.
+#>
+#Requires -Version 5.1
 [CmdletBinding()]
 param(
   [switch]$NoElevate,
