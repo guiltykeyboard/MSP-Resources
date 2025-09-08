@@ -1,33 +1,33 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Detect whether BitLocker is enabled on drives C, D, E, and F.
+  Return 1 if any **non‑removable** (fixed) drives have BitLocker enabled; otherwise 0.
 .DESCRIPTION
-  Designed for ConnectWise RMM (Asio). The script runs safely as SYSTEM; for mixed
-  scenarios it will elevate to administrator when not already running elevated.
-  It checks the BitLocker protection state for the fixed drives C, D, E, and F (if present)
-  using `Get-BitLockerVolume` when available, and falls back to parsing
-  `manage-bde -status` on systems without the BitLocker module. No local files are created.
+  Built for CW RMM (ConnectWise RMM - Asio) to run on a schedule (e.g., weekly) and feed a
+  Yes/No custom field. The script inspects **fixed/local** drives only (excludes removable
+  USB flash drives, optical, network, RAM disks) and checks BitLocker status per volume.
 
-  Output is a compact JSON object to STDOUT for easy parsing by RMM. A human‑readable
-  table is also printed unless `-Quiet` is supplied.
+  Output is a **single line**: `1` if any fixed drive has BitLocker protection **On**,
+  else `0`. Use this in CW RMM automation to set a boolean/flag custom field.
 
-.PARAMETER Quiet
-  Suppress the human‑readable table and only emit JSON.
+  Implementation details:
+  - Prefers `Get-BitLockerVolume` when available.
+  - Falls back to `manage-bde -status` for older hosts.
+  - Runs fine as SYSTEM (no local files created). In mixed scenarios, it can self‑elevate
+    when not already elevated unless `-NoElevate` is supplied.
 
 .PARAMETER NoElevate
-  Skip the self‑elevation step (useful if the host blocks UAC prompts in interactive runs).
+  Skip self‑elevation if not already elevated.
 
 .OUTPUTS
-  JSON (string) describing per‑drive status and a summary flag.
+  System.String — "1" or "0" on STDOUT for easy parsing by CW RMM.
 
 .EXAMPLE
-  powershell.exe -ExecutionPolicy Bypass -File .\checkIfBitlockerEnabled.ps1 -Quiet
-  # {"AnyEnabled":true,"Drives":{"C":{"Present":true,"Protection":"On","EncryptionPercentage":100,"Enabled":true},...}}
+  powershell.exe -ExecutionPolicy Bypass -File .\checkIfBitlockerEnabled.ps1
+  # 1  (means at least one fixed drive has BitLocker enabled)
 #>
 
 param(
-  [switch]$Quiet,
   [switch]$NoElevate
 )
 
@@ -36,91 +36,80 @@ function Test-IsElevated {
   catch { return $false }
 }
 
-# Mixed environments: elevate if needed (RMM usually runs as SYSTEM which is elevated)
+# Elevate when needed (CW RMM as SYSTEM is already elevated)
 if (-not $NoElevate -and -not (Test-IsElevated)) {
   try {
-    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" $($MyInvocation.BoundParameters.GetEnumerator() | ForEach-Object { if ($_.Value) { '-'+$_.Key } })" -Verb RunAs
+    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     exit 0
   } catch {
     Write-Warning "Elevation failed or was canceled; continuing without elevation."
   }
 }
 
-$targets = 'C','D','E','F'
+function Get-FixedDriveLetters {
+  # Try modern Get-Volume first
+  $letters = @()
+  try {
+    $letters = Get-Volume -ErrorAction Stop |
+      Where-Object { $_.DriveType -eq 'Fixed' -and $_.DriveLetter } |
+      Select-Object -ExpandProperty DriveLetter
+  } catch {
+    # Fall back to CIM for older builds
+    try {
+      $letters = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" |
+        Where-Object { $_.DeviceID -match ':' } |
+        ForEach-Object { $_.DeviceID.Substring(0,1) }
+    } catch {}
+  }
+  return @($letters | Sort-Object -Unique)
+}
 
-function Get-BitLockerInfo {
+function Get-BitLockerEnabledMap {
   param([string[]]$DriveLetters)
-  $result = @{}
+  $map = @{}
 
-  $blCmdlet = Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue
-  if ($blCmdlet) {
+  $blCmd = Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue
+  if ($blCmd) {
     $vols = Get-BitLockerVolume -ErrorAction SilentlyContinue
     foreach ($dl in $DriveLetters) {
       $present = Test-Path ("${dl}:\")
-      $info = [ordered]@{ Present = $present; Protection = $null; EncryptionPercentage = $null; Enabled = $false }
+      $enabled = $false
       if ($present) {
         $v = $vols | Where-Object { $_.MountPoint -eq "${dl}:\\" }
         if ($null -ne $v) {
-          $info.Protection = ($v.ProtectionStatus | ForEach-Object { $_.ToString() })
-          $info.EncryptionPercentage = $v.EncryptionPercentage
-          $info.Enabled = ($v.ProtectionStatus -eq 'On')
+          $enabled = ($v.ProtectionStatus.ToString() -eq 'On')
         } else {
-          # Volume exists but not returned (unlikely) – fallback to manage-bde for this drive
-          $info = (Get-ManageBdeFallback -Drive $dl)
+          $enabled = (Get-ManageBdeEnabled -Drive $dl)
         }
       }
-      $result[$dl] = $info
+      $map[$dl] = $enabled
     }
   } else {
     foreach ($dl in $DriveLetters) {
-      $result[$dl] = (Get-ManageBdeFallback -Drive $dl)
+      $map[$dl] = (Get-ManageBdeEnabled -Drive $dl)
     }
   }
-  return $result
+  return $map
 }
 
-function Get-ManageBdeFallback {
+function Get-ManageBdeEnabled {
   param([Parameter(Mandatory)] [ValidatePattern('^[A-Fa-f]$')] [string]$Drive)
   $present = Test-Path ("${Drive}:\")
-  $info = [ordered]@{ Present = $present; Protection = $null; EncryptionPercentage = $null; Enabled = $false }
-  if (-not $present) { return $info }
+  if (-not $present) { return $false }
   try {
     $raw = & manage-bde -status "${Drive}:\\" 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $raw) { return $info }
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { return $false }
     $prot = ($raw | Select-String -Pattern 'Protection Status:\s*(.*)' -AllMatches | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() } | Select-Object -First 1)
-    $pct  = ($raw | Select-String -Pattern 'Percentage Encrypted:\s*(\d+)' -AllMatches | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Select-Object -First 1)
-    if (-not $pct) { $pct = $null }
-    $info.Protection = $prot
-    $info.EncryptionPercentage = $pct
-    $info.Enabled = ($prot -match 'On')
-  } catch { }
-  return $info
+    return ($prot -match 'On')
+  } catch { return $false }
 }
 
-$driveInfo = Get-BitLockerInfo -DriveLetters $targets
-$anyEnabled = ($driveInfo.GetEnumerator() | Where-Object { $_.Value.Enabled } | Measure-Object).Count -gt 0
+# --- main ---
+$fixedLetters = Get-FixedDriveLetters
+$bitlockerMap = Get-BitLockerEnabledMap -DriveLetters $fixedLetters
+$anyEnabledFixed = $null -ne ($bitlockerMap.Values | Where-Object { $_ }) -and (($bitlockerMap.Values | Where-Object { $_ }).Count -gt 0)
 
-# Human-friendly output unless -Quiet
-if (-not $Quiet) {
-  $table = foreach ($k in $targets) {
-    $v = $driveInfo[$k]
-    [pscustomobject]@{
-      Drive = $k
-      Present = $v.Present
-      Protection = $v.Protection
-      EncryptionPercent = $v.EncryptionPercentage
-      Enabled = $v.Enabled
-    }
-  }
-  $table | Format-Table -AutoSize | Out-String | Write-Output
-}
+# Emit single-line boolean for CW RMM custom field mapping
+if ($anyEnabledFixed) { Write-Output '1' } else { Write-Output '0' }
 
-# JSON payload for RMM
-$payload = [ordered]@{
-  AnyEnabled = $anyEnabled
-  Drives     = $driveInfo
-}
-$payload | ConvertTo-Json -Depth 5 -Compress | Write-Output
-
-# Always exit 0 for detection runs; consumers should inspect JSON
 exit 0
