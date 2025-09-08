@@ -175,11 +175,28 @@ try {
   }
   if ($errors.Count -gt 0) { $payload.Errors = @($errors) }
 
+  # Build compact JSON of the core payload (no _meta yet)
+  $coreJson = $payload | ConvertTo-Json -Depth 6 -Compress
+
+  # Compute SHA256 of the core JSON to help verify integrity/length in RMM
+  $sha256 = [System.BitConverter]::ToString(
+                ([System.Security.Cryptography.SHA256]::Create()).ComputeHash(
+                    [System.Text.Encoding]::UTF8.GetBytes($coreJson)
+                )
+            ).Replace('-', '').ToLowerInvariant()
+  $chars = $coreJson.Length
+
+  # Attach meta (will be included only in the JSON output branch)
+  $payload._meta = [ordered]@{ sha256 = $sha256; chars = $chars }
+
+  # Final JSON (core fields + _meta)
+  $finalJson = $payload | ConvertTo-Json -Depth 6 -Compress
+
   if ($HumanReadable) {
-    "Device:"
+    "System Info:"
     $payload.Device | Format-List | Out-String | Write-Output
 
-    "Backups:"
+    "Escrow Status:"
     $payload.Backups | Format-List | Out-String | Write-Output
 
     "Drives:"
@@ -189,7 +206,8 @@ try {
     }
   }
   else {
-    $payload | ConvertTo-Json -Depth 6 -Compress | Write-Output
+    # Emit the JSON with _meta so you can verify truncation/integrity in RMM
+    Write-Output $finalJson
   }
 }
 catch {
