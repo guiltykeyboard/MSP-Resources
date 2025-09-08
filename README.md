@@ -42,17 +42,19 @@ This repository contains a curated collection of scripts for **ConnectWise RMM (
 
 ## One-Liners for RMM
 
-Use these templates to download and run a script directly from this repo.
+Use these templates to download and run a script directly from this repo. They download to a temporary location so you always pull the latest version.
 
 **PowerShell (Windows):**
 
 ```powershell
 $Base = 'https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main'
 $Rel  = '<path/to/script.ps1>'
-$Out  = 'C:\\ProgramData\\CW-RMM\\Scripts\\script.ps1'
-$null = New-Item -ItemType Directory -Force -Path (Split-Path $Out) -ErrorAction SilentlyContinue
-Invoke-WebRequest -UseBasicParsing -Uri ("$Base/$Rel") -OutFile $Out
-powershell.exe -ExecutionPolicy Bypass -File $Out
+$Tmp  = Join-Path $env:TEMP ("script_{0}.ps1" -f ([guid]::NewGuid()))
+
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+Invoke-WebRequest -UseBasicParsing -Uri ("$Base/$Rel") -OutFile $Tmp
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Tmp
+Remove-Item $Tmp -Force -ErrorAction SilentlyContinue
 ```
 
 **Bash (Linux/macOS):**
@@ -60,11 +62,11 @@ powershell.exe -ExecutionPolicy Bypass -File $Out
 ```bash
 BASE='https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main'
 REL='<path/to/script.sh>'
-OUT='/tmp/script.sh'
-mkdir -p "$(dirname "$OUT")"
+OUT="$(mktemp /tmp/script.XXXXXX.sh)"
 curl -fsSL "$BASE/$REL" -o "$OUT"
 chmod +x "$OUT"
 sudo "$OUT"
+rm -f "$OUT"
 ```
 
 **Python (Linux/macOS/Windows with Python 3):**
@@ -72,10 +74,10 @@ sudo "$OUT"
 ```bash
 BASE='https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main'
 REL='<path/to/script.py>'
-OUT='/tmp/script.py'
-mkdir -p "$(dirname "$OUT")"
+OUT="$(mktemp /tmp/script.XXXXXX.py)"
 curl -fsSL "$BASE/$REL" -o "$OUT"
 python3 "$OUT"
+rm -f "$OUT"
 ```
 
 ---
