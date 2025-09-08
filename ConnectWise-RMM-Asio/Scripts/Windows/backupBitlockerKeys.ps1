@@ -1,14 +1,3 @@
-<#PSScriptInfo
-.VERSION 1.0.0
-.GUID 0f7e9f9e-2c2b-4b1a-8f7e-6f6f3e1b8a3a
-.AUTHOR iTech MSP (Michael Stoffel)
-.COMPANYNAME iTech
-.COPYRIGHT (c) iTech. All rights reserved.
-.TAGS BitLocker, KeyBackup, RMM, AD, AAD, EntraID
-.LICENSEURI https://opensource.org/licenses/MIT
-.PROJECTURI https://github.com/guiltykeyboard/MSP-Resources
-#>
-
 <#
 .SYNOPSIS
 Backs up BitLocker recovery keys on all fixed drives, creating a recovery password protector if missing, and escrows keys to AD or Entra ID (AAD). Emits a single-line JSON payload for RMM.
@@ -40,6 +29,17 @@ Shows a readable summary of join state, escrow status, and any discovered recove
 .NOTES
 Requires PowerShell 5.1+ and BitLocker/management tools. Approved verbs are used for public functions. The script avoids writing files locally and is StrictMode‑safe.
 #>
+<#PSScriptInfo
+.VERSION 1.0.0
+.GUID 0f7e9f9e-2c2b-4b1a-8f7e-6f6f3e1b8a3a
+.AUTHOR iTech MSP (Michael Stoffel)
+.COMPANYNAME iTech
+.COPYRIGHT (c) iTech. All rights reserved.
+.TAGS BitLocker, KeyBackup, RMM, AD, AAD, EntraID
+.LICENSEURI https://opensource.org/licenses/MIT
+.PROJECTURI https://github.com/guiltykeyboard/MSP-Resources
+#>
+
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
