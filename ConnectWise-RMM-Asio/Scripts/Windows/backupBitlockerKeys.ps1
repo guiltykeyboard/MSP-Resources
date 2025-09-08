@@ -95,9 +95,9 @@ function Get-RecoveryPasswordsFromManageBde {
         $id = $Matches[1]
         $current = [ordered]@{ Id = "{$id}"; Password = $null }
       } elseif ($line -match '^\s*Password:\s*([0-9\- ]{20,})') {
-        if ($current -ne $null) {
-          $pwd = ($Matches[1] -replace '\s','').Trim()
-          $current.Password = $pwd
+        if ($null -ne $current) {
+          $recoveryPwd = ($Matches[1] -replace '\s','').Trim()
+          $current.Password = $recoveryPwd
           $items += [pscustomobject]$current
           $current = $null
         }
@@ -107,7 +107,7 @@ function Get-RecoveryPasswordsFromManageBde {
   } catch { return @() }
 }
 
-function Ensure-BackupToAD {
+function Invoke-BackupToAD {
   param([string]$Drive, [string]$ProtectorId)
   try {
     $null = & manage-bde -protectors -adbackup "${Drive}:" -id $ProtectorId 2>$null
@@ -115,7 +115,7 @@ function Ensure-BackupToAD {
   } catch { return $false }
 }
 
-function Ensure-BackupToAAD {
+function Invoke-BackupToAAD {
   param([string]$Drive, [string]$ProtectorId)
   $cmd = Get-Command BackupToAAD-BitLockerKeyProtector -ErrorAction SilentlyContinue
   if (-not $cmd) { return $false }
@@ -124,7 +124,18 @@ function Ensure-BackupToAAD {
     return $true
   } catch { return $false }
 }
-
+# Use approved verbs per PowerShell guidelines:
+# - "Invoke" for actions (was: Ensure-BackupToAAD, Use-BackupToAAD)
+# All function names above now use approved verbs.
+function Invoke-BackupToAAD {
+  param([string]$Drive, [string]$ProtectorId)
+  $cmd = Get-Command BackupToAAD-BitLockerKeyProtector -ErrorAction SilentlyContinue
+  if (-not $cmd) { return $false }
+  try {
+    BackupToAAD-BitLockerKeyProtector -MountPoint "${Drive}:" -KeyProtectorId $ProtectorId -ErrorAction Stop | Out-Null
+    return $true
+  } catch { return $false }
+}
 # --- main ---
 $errors = @()
 try {
@@ -142,11 +153,11 @@ try {
     foreach ($it in $items) {
       if ($join.DomainJoined) {
         $adAttempted = $true
-        if (Ensure-BackupToAD -Drive $dl -ProtectorId $it.Id) { $adSuccess++ } else { $errors += "AD escrow failed for $dl $($it.Id)" }
+        if (Invoke-BackupToAD -Drive $dl -ProtectorId $it.Id) { $adSuccess++ } else { $errors += "AD escrow failed for $dl $($it.Id)" }
       }
       if ($join.AzureAdJoined) {
         $aadAttempted = $true
-        if (Ensure-BackupToAAD -Drive $dl -ProtectorId $it.Id) { $aadSuccess++ } else { $errors += "AAD escrow failed for $dl $($it.Id)" }
+        if (Invoke-BackupToAAD -Drive $dl -ProtectorId $it.Id) { $aadSuccess++ } else { $errors += "AAD escrow failed for $dl $($it.Id)" }
       }
     }
   }
