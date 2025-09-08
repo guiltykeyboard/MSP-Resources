@@ -60,10 +60,10 @@ This script is designed for use with ConnectWise RMM. It determines whether any 
     if ($null -eq $val) { $val = ($rawOut | Select-Object -Last 1) }
     Write-Output $val
     ```
+
 3. Configure the script step to update the **BitLocker Enabled** custom field with the `%output%` value.
 4. Assign the script to devices where you want to monitor BitLocker encryption status.
 5. Verify by running the script manually once and checking that the field updates correctly.
-
 
 - **Custom Field Name:** `BitLocker Enabled`  
 - **Custom Field Type:** Boolean (preferred) or Text  
