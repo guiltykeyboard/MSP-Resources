@@ -136,10 +136,6 @@ jobs:
           labels: |
             ci-catalog
             automation
-          reviewers: |
-            guiltykeyboard
-          assignees: |
-            guiltykeyboard
           delete-branch: true
 
       - name: Echo PR link
@@ -147,10 +143,35 @@ jobs:
         run: |
           echo "Pull Request URL: https://github.com/${{ github.repository }}/pull/${{ steps.cpr.outputs.pull-request-number }}"
 
+      - name: Read validation status
+        id: val
+        run: |
+          if [[ -f .catalog_validation_failed ]]; then
+            echo "ok=false" >> $GITHUB_OUTPUT
+            echo "Catalog validation failed (marker file present)."
+          else
+            echo "ok=true" >> $GITHUB_OUTPUT
+            echo "Catalog validation passed (no marker)."
+          fi
+
       - name: Enable auto-merge (squash)
-        if: ${{ steps.cpr.outputs.pull-request-number }}
+        if: ${{ steps.cpr.outputs.pull-request-number && steps.val.outputs.ok == 'true' }}
         uses: peter-evans/enable-pull-request-automerge@v3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           pull-request-number: ${{ steps.cpr.outputs.pull-request-number }}
           merge-method: squash
+
+      - name: Assign & request review if blocked or validation failed
+        if: ${{ steps.cpr.outputs.pull-request-number && (steps.val.outputs.ok != 'true') }}
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pull_number = parseInt(process.env.PR_NUMBER, 10);
+            core.info('Validation failed; assigning and requesting review from @guiltykeyboard');
+            await github.rest.issues.addAssignees({ owner, repo, issue_number: pull_number, assignees: ['guiltykeyboard'] });
+            await github.rest.pulls.requestReviewers({ owner, repo, pull_number, reviewers: ['guiltykeyboard'] });
