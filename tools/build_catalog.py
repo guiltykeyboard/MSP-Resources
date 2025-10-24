@@ -104,6 +104,22 @@ def main():
         return 0
 
     data = collect()
+    # ---- DEBUG: enumerate discovered items & pre-write count ----
+    try:
+        total = sum(len(v) for v in data.values())
+        print(f"[build_catalog] Discovered {total} scripts (pre-write)")
+        found_m365 = False
+        for group, items in sorted(data.items()):
+            for rel, syn in items:
+                print(f"[build_catalog] ITEM path={rel} syn={'YES' if syn else 'NO'}")
+                if rel.endswith("ConnectWise-RMM-Asio/Scripts/Windows/M365Cleanup.ps1"):
+                    found_m365 = True
+                    print(f"[build_catalog] ITEM-M365 matched for path={rel}")
+        if not found_m365:
+            print("[build_catalog] (warn) M365Cleanup.ps1 was NOT found in discovery list.")
+    except Exception as _e:
+        print(f"[build_catalog] (warn) enumerate items failed: {_e}")
+    # ---- END DEBUG ----
     lines = []
     for group, items in sorted(data.items()):
         lines.append(f"- **{group}**")
@@ -127,6 +143,13 @@ def main():
         print("Updated README.md with grouped catalog.")
     else:
         print("No README changes needed.")
+    # ---- final discovery count ----
+    try:
+        total = sum(len(v) for v in data.values())
+        print(f"[build_catalog] Discovered {total} scripts")
+    except Exception as _e:
+        print(f"[build_catalog] (warn) could not print discovery count: {_e}")
+    # ---- END final discovery count ----
     return 0
 
 if __name__ == "__main__":
