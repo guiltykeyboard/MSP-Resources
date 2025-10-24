@@ -144,7 +144,8 @@ jobs:
 
       - name: Echo PR link
         if: ${{ steps.cpr.outputs.pull-request-number }}
-        run: echo "Pull Request URL: https://github.com/${{ github.repository }}/pull/${{ steps.cpr.outputs.pull-request-number }}"
+        run: |
+          echo "Pull Request URL: https://github.com/${{ github.repository }}/pull/${{ steps.cpr.outputs.pull-request-number }}"
 
       - name: Enable auto-merge (squash)
         if: ${{ steps.cpr.outputs.pull-request-number }}
