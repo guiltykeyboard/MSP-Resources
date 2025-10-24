@@ -4,11 +4,11 @@ on:
   push:
     branches: [ main ]
   schedule:
-    - cron: '0 5 * * *'   # nightly at 05:00 UTC
+    - cron: '0 5 * * *'
   workflow_dispatch: {}
 
 permissions:
-  contents: write          # needed for pushing branch & enabling auto-merge
+  contents: write
   pull-requests: write
 
 jobs:
@@ -44,7 +44,6 @@ jobs:
           git fetch origin
           BASE_SHA=$(git rev-parse origin/main)
           echo "BASE_SHA=$BASE_SHA" >> $GITHUB_ENV
-          # Start clean branch so it is never behind main at start
           git checkout -B chore/auto-update-catalog "${BASE_SHA}"
 
       - name: Generate catalog
@@ -55,7 +54,6 @@ jobs:
       - name: "Post-gen: echo discovery count (from generator output)"
         run: |
           if [[ -f build_catalog.log ]]; then
-            # Expect lines like: "[build_catalog] Discovered N scripts"
             LINE=$(grep -Eo '\[build_catalog\].*Discovered[[:space:]]+[0-9]+' build_catalog.log | tail -n1 || true)
             if [[ -n "$LINE" ]]; then
               COUNT=$(echo "$LINE" | grep -Eo '[0-9]+' | tail -n1)
