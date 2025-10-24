@@ -29,6 +29,16 @@ jobs:
           git config user.name "github-actions"
           git config user.email "actions@github.com"
 
+      - name: Pre-flight: discover scripts (and fail if zero)
+        run: |
+          set -e
+          COUNT=$(find ConnectWise-RMM-Asio/Scripts -type f \( -name '*.ps1' -o -name '*.psm1' -o -name '*.py' -o -name '*.sh' \) 2>/dev/null | wc -l | tr -d ' ')
+          echo "Pre-flight discovered scripts: $COUNT"
+          if [[ "$COUNT" -eq 0 ]]; then
+            echo "::error::No scripts discovered under ConnectWise-RMM-Asio/Scripts (expected .ps1/.psm1/.py/.sh)."
+            exit 1
+          fi
+
       - name: Record base SHA & create fresh PR branch from latest main
         run: |
           git fetch origin
@@ -39,7 +49,27 @@ jobs:
 
       - name: Generate catalog
         run: |
-          python3 tools/build_catalog.py
+          set -o pipefail
+          python3 tools/build_catalog.py | tee build_catalog.log
+
+      - name: Post-gen: echo discovery count (from generator output)
+        run: |
+          if [[ -f build_catalog.log ]]; then
+            # Expect lines like: "[build_catalog] Discovered N scripts"
+            LINE=$(grep -Eo '\[build_catalog\].*Discovered[[:space:]]+[0-9]+' build_catalog.log | tail -n1 || true)
+            if [[ -n "$LINE" ]]; then
+              COUNT=$(echo "$LINE" | grep -Eo '[0-9]+' | tail -n1)
+              echo "Generator reported discovery count: $COUNT"
+              if [[ "$COUNT" -eq 0 ]]; then
+                echo "::error::Generator discovered 0 scripts. Failing the job."
+                exit 1
+              fi
+            else
+              echo "::warning::No discovery count found in generator output. Proceeding."
+            fi
+          else
+            echo "::warning::build_catalog.log not found; skipping discovery check."
+          fi
 
       - name: Commit changes (if any)
         run: |
