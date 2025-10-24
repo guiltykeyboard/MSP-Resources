@@ -6,3 +6,4 @@
 [build_catalog] ITEM path=ConnectWise-RMM-Asio/Scripts/Windows/enableBitlocker.ps1 syn=YES
 Updated README.md with grouped catalog.
 [build_catalog] Discovered 4 scripts
+[build_catalog] VALIDATION: all discovered scripts present in README.
