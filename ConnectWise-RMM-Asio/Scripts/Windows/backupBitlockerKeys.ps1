@@ -42,10 +42,105 @@ Requires PowerShell 5.1+ and BitLocker/management tools. Approved verbs are used
 
 #Requires -Version 5.1
 [CmdletBinding()]
+
 param(
   [switch]$NoElevate,
-  [switch]$HumanReadable
+  [switch]$HumanReadable,
+  [switch]$SelfUpdated  # internal guard to avoid update loops
 )
+
+# Baked commit fallback (replaced by CI); leave placeholder literally as @GIT_COMMIT@
+$Script:GIT_COMMIT = '@GIT_COMMIT@'
+
+# --- Metadata / Source Info --------------------------------------------------
+try {
+  $scriptPath = $PSCommandPath
+  $commitHash = ''
+  $gitRoot = (Get-Item $scriptPath).Directory.FullName
+  while (-not (Test-Path (Join-Path $gitRoot '.git')) -and (Split-Path $gitRoot) -ne $gitRoot) {
+    $gitRoot = Split-Path $gitRoot
+  }
+  if (Test-Path (Join-Path $gitRoot '.git')) {
+    $commitHash = (git -C $gitRoot rev-parse --short HEAD 2>$null)
+  }
+  if (-not $commitHash -and $Script:GIT_COMMIT -and $Script:GIT_COMMIT -ne '@GIT_COMMIT@') {
+    $commitHash = $Script:GIT_COMMIT
+  }
+  $msg = "SCRIPT SOURCE: $scriptPath"
+  if ($commitHash) { $msg += " (Git commit: $commitHash)" }
+  Write-Output $msg
+} catch {
+  Write-Output "SCRIPT SOURCE: $PSCommandPath (Git info unavailable)"
+}
+
+function Get-RepoLatestShortSHA {
+  param([string]$Repo = 'guiltykeyboard/MSP-Resources', [string]$Ref = 'main')
+  try {
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+    $uri = "https://api.github.com/repos/$Repo/commits/$Ref"
+    $resp = Invoke-WebRequest -Uri $uri -UseBasicParsing -Headers @{ 'User-Agent'='MSP-Resources-SelfUpdate' } -ErrorAction Stop
+    $json = $resp.Content | ConvertFrom-Json
+    $sha = $json.sha
+    if ($sha -and $sha.Length -ge 7) { return $sha.Substring(0,7) }
+  } catch { }
+  return $null
+}
+
+function Invoke-SelfUpdateIfOutdated {
+  param(
+    [Parameter(Mandatory)][string]$RepoRelPath,
+    [string]$Repo = 'guiltykeyboard/MSP-Resources',
+    [string]$Ref = 'main',
+    [switch]$Skip
+  )
+  if ($Skip) { return }
+  $latest = Get-RepoLatestShortSHA -Repo $Repo -Ref $Ref
+  if (-not $latest) { return }
+  $current = $commitHash
+  if (-not $current) { $current = $Script:GIT_COMMIT }
+  if ($current -and $latest -eq $current) { return }
+  try {
+    $rawBase = "https://raw.githubusercontent.com/$Repo/$Ref"
+    $url = "$rawBase/$RepoRelPath"
+    $tmp = Join-Path $env:TEMP ("{0}-{1}.ps1" -f ([IO.Path]::GetFileNameWithoutExtension($RepoRelPath)), $latest)
+    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tmp -ErrorAction Stop
+
+    # Integrity verification using GitHub API SHA
+    try {
+      $shaApi = "https://api.github.com/repos/$Repo/contents/$RepoRelPath?ref=$Ref"
+      $shaResp = Invoke-WebRequest -UseBasicParsing -Uri $shaApi -Headers @{ 'User-Agent'='MSP-Resources-SelfUpdate' } -ErrorAction Stop
+      $shaJson = $shaResp.Content | ConvertFrom-Json
+      $expectedSha = $shaJson.sha
+      if ($expectedSha) {
+        $actualSha = [System.BitConverter]::ToString((Get-FileHash -Path $tmp -Algorithm SHA256).Hash).Replace('-', '').ToLowerInvariant()
+        if (-not ($actualSha.StartsWith($expectedSha.Substring(0,7)))) {
+          throw "Integrity check failed for downloaded script. Expected SHA prefix $($expectedSha.Substring(0,7)), got $($actualSha.Substring(0,7))."
+        } else {
+          Write-Output "SELF-UPDATE: Integrity verified ($($expectedSha.Substring(0,7)))"
+        }
+      }
+    } catch {
+      Write-Warning "SELF-UPDATE: Integrity verification skipped or failed: $($_.Exception.Message)"
+    }
+
+    Write-Output "SELF-UPDATE: Downloaded latest script ($latest). Re-launching..."
+    $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$tmp`"") +
+               ($PSBoundParameters.GetEnumerator() | ForEach-Object {
+                 if ($_.Key -eq 'SelfUpdated') { return $null }
+                 if ($_.Value -is [switch]) { if ($_.Value) { "-$(
+$_.Key)" } }
+                 else { "-$(
+$_.Key)"; "$(
+$_.Value)" }
+               }) + '-SelfUpdated'
+    Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Wait -NoNewWindow
+    exit 0
+  } catch {
+    Write-Warning "SELF-UPDATE: Failed to download latest script: $($_.Exception.Message). Continuing with local version."
+  }
+}
+
+Invoke-SelfUpdateIfOutdated -RepoRelPath 'ConnectWise-RMM-Asio/Scripts/Windows/backupBitlockerKeys.ps1' -Skip:$SelfUpdated
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'

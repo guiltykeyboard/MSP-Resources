@@ -118,3 +118,34 @@ MSP-Resources/
 ## License
 
 This repository is licensed under the [MIT License](LICENSE).
+
+
+## Commit ID stamping
+
+Scripts in this repo can include a baked-in Git commit identifier using the literal placeholder `@GIT_COMMIT@`.  
+A GitHub Actions workflow (`.github/workflows/stamp-commit.yml`) runs on pushes to `main` and replaces that placeholder with the short SHA of the triggering commit, then makes a follow-up commit with `[skip ci]` to avoid loops.
+
+**How to use in scripts**
+
+Add a line like this near the top of your script:
+
+```powershell
+# Baked commit fallback (replaced by CI)
+$Script:GIT_COMMIT = '@GIT_COMMIT@'
+```
+
+And when you print script metadata, prefer the baked value if Git metadata is unavailable:
+
+```powershell
+$commitHash = $null
+if (Test-Path (Join-Path $gitRoot '.git')) {
+  $commitHash = (git -C $gitRoot rev-parse --short HEAD 2>$null)
+}
+if (-not $commitHash -and $Script:GIT_COMMIT -and $Script:GIT_COMMIT -ne '@GIT_COMMIT@') {
+  $commitHash = $Script:GIT_COMMIT
+}
+```
+
+This ensures:
+- When running in a Git checkout, the live `HEAD` is shown.
+- When distributed without `.git` (e.g., RMM), the baked-in commit is shown.

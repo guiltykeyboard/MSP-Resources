@@ -1,0 +1,43 @@
+# NOTE: GitHub only runs workflows from .github/workflows/*.yml
+# Move/rename this file to: .github/workflows/stamp-commit.yml
+name: Stamp commit IDs into scripts
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: write
+
+jobs:
+  stamp:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Run stamp tool
+        env:
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          python3 tools/stamp_commit.py
+
+      - name: Commit stamped files
+        run: |
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "chore(ci): stamp commit ${{ github.sha }} into scripts [skip ci]"
+            git push
+          else
+            echo "No files needed stamping."
+          fi
