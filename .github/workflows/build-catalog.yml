@@ -29,7 +29,7 @@ jobs:
           git config user.name "github-actions"
           git config user.email "actions@github.com"
 
-      - name: Pre-flight: discover scripts (and fail if zero)
+      - name: "Pre-flight: discover scripts (and fail if zero)"
         run: |
           set -e
           COUNT=$(find ConnectWise-RMM-Asio/Scripts -type f \( -name '*.ps1' -o -name '*.psm1' -o -name '*.py' -o -name '*.sh' \) 2>/dev/null | wc -l | tr -d ' ')
@@ -52,7 +52,7 @@ jobs:
           set -o pipefail
           python3 tools/build_catalog.py | tee build_catalog.log
 
-      - name: Post-gen: echo discovery count (from generator output)
+      - name: "Post-gen: echo discovery count (from generator output)"
         run: |
           if [[ -f build_catalog.log ]]; then
             # Expect lines like: "[build_catalog] Discovered N scripts"
