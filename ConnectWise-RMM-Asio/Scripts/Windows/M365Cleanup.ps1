@@ -4,6 +4,14 @@ param(
   [switch]$WhatIf
 )
 
+<#
+.SYNOPSIS
+Removes all non-English Microsoft 365 and OneNote language packs using Winget, Appx, or Office Deployment Tool.
+.DESCRIPTION
+This script identifies and removes all additional Microsoft 365 and OneNote language packs except the one specified with -Keep (default: en-us). 
+It supports ConnectWise RMM (ASIO) and console execution modes, automatically selecting the correct cleanup method.
+#>
+
 # --- Metadata / Source Info --------------------------------------------------
 try {
   $scriptPath = $PSCommandPath
