@@ -14,8 +14,8 @@ This script identifies and removes all additional Microsoft 365 and OneNote lang
 It supports ConnectWise RMM (ASIO) and console execution modes, automatically selecting the correct cleanup method.
 #>
 
-# Baked commit fallback (replaced by CI); leave placeholder literally as 120a21bd1fa9f437e13724b8472758dea908be3c
-$Script:GIT_COMMIT = '120a21bd1fa9f437e13724b8472758dea908be3c'
+# Baked commit fallback (replaced by CI); leave placeholder literally as e6b106ad979bb81b0b48c6714a3f31128a69ec03
+$Script:GIT_COMMIT = 'e6b106ad979bb81b0b48c6714a3f31128a69ec03'
 
 # --- Metadata / Source Info --------------------------------------------------
 try {
@@ -28,7 +28,7 @@ try {
   if (Test-Path (Join-Path $gitRoot '.git')) {
     $commitHash = (git -C $gitRoot rev-parse --short HEAD 2>$null)
   }
-  if (-not $commitHash -and $Script:GIT_COMMIT -and $Script:GIT_COMMIT -ne '120a21bd1fa9f437e13724b8472758dea908be3c') {
+  if (-not $commitHash -and $Script:GIT_COMMIT -and $Script:GIT_COMMIT -ne 'e6b106ad979bb81b0b48c6714a3f31128a69ec03') {
     $commitHash = $Script:GIT_COMMIT
   }
   $msg = "SCRIPT SOURCE: $scriptPath"
