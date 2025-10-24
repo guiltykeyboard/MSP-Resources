@@ -114,16 +114,15 @@ jobs:
       - name: Determine whether PR action is needed
         id: needpr
         run: |
+          set -e
+          git fetch origin main
           HAS_COMMITS=false
-          if [[ -n "$(git log ${BASE_SHA}..HEAD --oneline 2>/dev/null || true)" ]]; then HAS_COMMITS=true; fi
-          HAS_REMOTE=false
-          if git ls-remote --exit-code --heads origin chore/auto-update-catalog >/dev/null 2>&1; then HAS_REMOTE=true; fi
+          if ! git diff --quiet origin/main..HEAD -- README.md; then HAS_COMMITS=true; fi
           echo "has_commits=${HAS_COMMITS}" >> $GITHUB_OUTPUT
-          echo "has_remote=${HAS_REMOTE}" >> $GITHUB_OUTPUT
-          echo "has_commits=${HAS_COMMITS}"; echo "has_remote=${HAS_REMOTE}"
+          echo "has_commits=${HAS_COMMITS}"
 
       - name: Create or update PR
-        if: ${{ steps.needpr.outputs.has_commits == 'true' || steps.needpr.outputs.has_remote == 'true' }}
+        if: ${{ steps.needpr.outputs.has_commits == 'true' }}
         id: cpr
         uses: peter-evans/create-pull-request@v6
         with:
@@ -137,6 +136,11 @@ jobs:
             ci-catalog
             automation
           delete-branch: true
+      - name: Inspect README markers
+        run: |
+          echo "Has BEGIN marker?"; grep -q "<!-- BEGIN SCRIPT CATALOG -->" README.md && echo yes || echo no
+          echo "Has END marker?"; grep -q "<!-- END SCRIPT CATALOG -->" README.md && echo yes || echo no
+          echo "First 20 lines of README:"; head -n 20 README.md || true
 
       - name: Echo PR link
         if: ${{ steps.cpr.outputs.pull-request-number }}
