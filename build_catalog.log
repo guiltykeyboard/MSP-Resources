@@ -1,9 +1,10 @@
-[build_catalog] Discovered 4 scripts (pre-write)
+[build_catalog] Discovered 5 scripts (pre-write)
 [build_catalog] ITEM path=ConnectWise-RMM-Asio/Scripts/Windows/M365Cleanup.ps1 syn=YES
 [build_catalog] ITEM-M365 matched for path=ConnectWise-RMM-Asio/Scripts/Windows/M365Cleanup.ps1
 [build_catalog] ITEM path=ConnectWise-RMM-Asio/Scripts/Windows/backupBitlockerKeys.ps1 syn=YES
 [build_catalog] ITEM path=ConnectWise-RMM-Asio/Scripts/Windows/checkIfBitlockerEnabled.ps1 syn=YES
+[build_catalog] ITEM path=ConnectWise-RMM-Asio/Scripts/Windows/convertWindowsRetailToOEM.ps1 syn=YES
 [build_catalog] ITEM path=ConnectWise-RMM-Asio/Scripts/Windows/enableBitlocker.ps1 syn=YES
 Updated README.md with grouped catalog.
-[build_catalog] Discovered 4 scripts
+[build_catalog] Discovered 5 scripts
 [build_catalog] VALIDATION: all discovered scripts present in README.
