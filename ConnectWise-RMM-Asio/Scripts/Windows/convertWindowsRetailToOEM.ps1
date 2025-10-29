@@ -31,9 +31,14 @@ function Write-Log {
 }
 
 function Get-CurrentLicenseInfo {
-    # Select the active Windows license row (has PartialProductKey)
+    # Filter precisely to the Windows OS licensing row for Professional that has a key
+    $WindowsAppId = '55c92734-d682-4d71-983e-d6ec3f16059f' # Windows OS ApplicationId
     $win = Get-CimInstance -ClassName SoftwareLicensingProduct |
-        Where-Object { $_.Name -like 'Windows*' -and $_.PartialProductKey } |
+        Where-Object {
+            $_.ApplicationId -eq $WindowsAppId -and
+            $_.LicenseFamily -match 'Professional' -and
+            $_.PartialProductKey
+        } |
         Select-Object Name, Description, LicenseStatus, PartialProductKey
     return $win
 }
@@ -50,6 +55,9 @@ function Invoke-Slmgr {
     $p = Start-Process @psi
     return $p.ExitCode
 }
+
+# Optional: allow last-resort DISM edition repair when ALLOW_DISM_REPAIR is true/1
+$AllowDismRepair = [bool]($env:ALLOW_DISM_REPAIR -as [int]) -or ($env:ALLOW_DISM_REPAIR -eq 'true')
 
 try {
     Write-Log "Starting Retail → OEM_DM switch + activation."
@@ -91,6 +99,18 @@ try {
         [void](Invoke-Slmgr @('/skms',''))
     }
 
+    # If Retail/KMS residue is present, perform a clean key reset
+    if ($lic.Description -match 'RETAIL channel' -or $lic.Description -match 'Volume:GVLK|KMS') {
+        Write-Log "Resetting prior key state (upk/cpky, sppsvc restart, rebuild license files)."
+        try { [void](Invoke-Slmgr @('/upk')) } catch {}
+        try { [void](Invoke-Slmgr @('/cpky')) } catch {}
+        try {
+            Write-Log "Restarting Software Protection service (sppsvc)."
+            Stop-Service -Name sppsvc -Force -ErrorAction SilentlyContinue
+            Start-Service -Name sppsvc -ErrorAction SilentlyContinue
+        } catch {}
+        try { [void](Invoke-Slmgr @('/rilc')) } catch {}
+    }
     # Install OEM key (replaces current Retail key)
     Write-Log "Installing OEM key..."
     [void](Invoke-Slmgr @('/ipk', $oemKey))
@@ -111,6 +131,24 @@ try {
     $isOem = $post.Description -match 'OEM_DM channel'
     $isActivated = $post.LicenseStatus -eq 1
 
+    if (-not $isOem -or -not $isActivated) {
+        Write-Log "Primary activation did not succeed. Trying WMI InstallProductKey + re-activation."
+        try {
+            $svc = Get-CimInstance -ClassName SoftwareLicensingService
+            [void]($svc.InstallProductKey($oemKey))
+            [void](Invoke-Slmgr @('/ato'))
+            Start-Sleep -Seconds 3
+            $post = Get-CurrentLicenseInfo
+            if ($post) {
+                Write-Log ("Post-fallback: Description: {0}; LicenseStatus: {1}" -f $post.Description,$post.LicenseStatus)
+                $isOem = $post.Description -match 'OEM_DM channel'
+                $isActivated = $post.LicenseStatus -eq 1
+            }
+        } catch {
+            Write-Log ("WMI InstallProductKey path failed: {0}" -f $_.Exception.Message) 'WARN'
+        }
+    }
+
     if ($isOem -and $isActivated) {
         Write-Log "SUCCESS: Channel is OEM_DM and LicenseStatus=1 (activated)."
         exit 0
@@ -119,6 +157,15 @@ try {
         exit 3
     } else {
         Write-Log "FAILED: Channel did not switch to OEM_DM or activation failed." 'ERROR'
+        if ($AllowDismRepair) {
+            Write-Log "ALLOW_DISM_REPAIR enabled. Attempting DISM edition repair to 'Professional' with OEM key (may require reboot)."
+            try {
+                Start-Process -FilePath dism.exe -ArgumentList "/online","/Set-Edition:Professional","/ProductKey:$oemKey","/AcceptEula" -Wait -NoNewWindow
+                Write-Log "DISM completed. A reboot may be required. Re-run activation after reboot if needed."
+            } catch {
+                Write-Log ("DISM repair failed: {0}" -f $_.Exception.Message) 'WARN'
+            }
+        }
         exit 2
     }
 
