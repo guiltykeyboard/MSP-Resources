@@ -2,10 +2,9 @@
 param(
   [string]$Keep = 'en-us',
   [switch]$WhatIf,
-  [switch]$SelfUpdated,              # internal guard to avoid update loops
-  [string]$RepoRelPath,              # optional: allow RMM launchers to pass repo path without error
-  [string]$Repo = 'guiltykeyboard/MSP-Resources',
-  [string]$Ref  = 'main'
+  [switch]$SelfUpdated,  # internal guard to avoid update loops
+  [switch]$VerboseLog,                 # extra diagnostics to RMM log
+  [switch]$AggressiveODT               # remove a wide set of languages via ODT even if detection fails
 )
 
 
@@ -17,8 +16,8 @@ This script identifies and removes all additional Microsoft 365 and OneNote lang
 It supports ConnectWise RMM (ASIO) and console execution modes, automatically selecting the correct cleanup method.
 #>
 
-# Baked commit fallback (replaced by CI); leave placeholder literally as 1e57416117967e0a7287b9fd55afb487a3288a16
-$Script:GIT_COMMIT = '1e57416117967e0a7287b9fd55afb487a3288a16'
+# Baked commit fallback (replaced by CI); leave placeholder literally as 3ee106a090be77bf32cdb28c0b8ae47164f5e5ca
+$Script:GIT_COMMIT = '3ee106a090be77bf32cdb28c0b8ae47164f5e5ca'
 
 # --- Metadata / Source Info --------------------------------------------------
 try {
@@ -31,7 +30,7 @@ try {
   if (Test-Path (Join-Path $gitRoot '.git')) {
     $commitHash = (git -C $gitRoot rev-parse --short HEAD 2>$null)
   }
-  if (-not $commitHash -and $Script:GIT_COMMIT -and $Script:GIT_COMMIT -ne '1e57416117967e0a7287b9fd55afb487a3288a16') {
+  if (-not $commitHash -and $Script:GIT_COMMIT -and $Script:GIT_COMMIT -ne '3ee106a090be77bf32cdb28c0b8ae47164f5e5ca') {
     $commitHash = $Script:GIT_COMMIT
   }
   $msg = "SCRIPT SOURCE: $scriptPath"
@@ -108,14 +107,7 @@ $_.Value)" }
   }
 }
 
-
-# Allow launcher-provided overrides but default to this script's known path
-$__RepoRelPath = if ($PSBoundParameters.ContainsKey('RepoRelPath') -and $RepoRelPath) {
-  $RepoRelPath
-} else {
-  'ConnectWise-RMM-Asio/Scripts/Windows/M365Cleanup.ps1'
-}
-Invoke-SelfUpdateIfOutdated -RepoRelPath $__RepoRelPath -Repo $Repo -Ref $Ref -Skip:$SelfUpdated
+Invoke-SelfUpdateIfOutdated -RepoRelPath 'ConnectWise-RMM-Asio/Scripts/Windows/M365Cleanup.ps1' -Skip:$SelfUpdated
 
 # --- RMM / Console detection --------------------------------------------------
 function Test-IsCWRMM {
@@ -142,11 +134,23 @@ function Show-Progress([string]$activity,[string]$status,[int]$pct) {
 
 # --- Helpers ------------------------------------------------------------------
 $Keep = $Keep.ToLower()
+
 $wingetPrefixes = @(
   '^Microsoft 365 - (?<lang>[a-z]{2}-[a-z]{2})\b',
   '^OneNote - (?<lang>[a-z]{2}-[a-z]{2})\b',
   '^Microsoft OneNote - (?<lang>[a-z]{2}-[a-z]{2})\b'
 )
+
+# Common Office language IDs for aggressive removal (non-exhaustive but broad)
+$CommonOfficeLangs = @(
+  'ar-sa','bg-bg','cs-cz','da-dk','de-de','el-gr','es-es','fi-fi','fr-fr','he-il','hr-hr','hu-hu',
+  'it-it','ja-jp','ko-kr','nb-no','nl-nl','pl-pl','pt-br','pt-pt','ro-ro','ru-ru','sk-sk','sv-se',
+  'th-th','tr-tr','uk-ua','vi-vn','zh-cn','zh-tw'
+)
+
+function VStamp([string]$msg) {
+  if ($VerboseLog) { Stamp $msg }
+}
 
 # --- Click-to-Run (C2R) / ODT helpers ----------------------------------------
 function Get-C2RProductId {
@@ -192,6 +196,8 @@ function Get-InstalledC2RLanguages {
       }
     } catch { }
   }
+  # Extra verbose diagnostics
+  VStamp "[odt] Detected languages from C2R/ARP: $(@($langs) -join ', ')"
   # Return as array
   return @($langs)
 }
@@ -210,6 +216,12 @@ function Remove-WithODT {
   $allLangs = Get-InstalledC2RLanguages
   $removeLangs = @()
   foreach ($l in $allLangs) { if ($l -ne $KeepLang.ToLower()) { $removeLangs += $l } }
+
+  if (-not $removeLangs -and $AggressiveODT) {
+    # Fall back to a broad list minus the Keep language
+    $removeLangs = $CommonOfficeLangs | Where-Object { $_ -ne $KeepLang.ToLower() }
+    Stamp "[odt] Aggressive mode: removing common Office languages: $($removeLangs -join ', ')"
+  }
 
   if (-not $removeLangs) {
     Stamp "[odt] No non-$KeepLang languages detected for $productId."
@@ -456,12 +468,31 @@ if (-not $wingetRemoved) {
   $appxRemoved = Remove-WithAppx -KeepLang $Keep -WhatIf:$WhatIf
 }
 
+# Upfront verbose ARP diagnostic dump if requested
+if ($VerboseLog) {
+  try {
+    $uninstRoots = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')
+    foreach ($root in $uninstRoots) {
+      Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+          $dn = (Get-ItemProperty $_.PsPath -Name DisplayName -ErrorAction Stop).DisplayName
+          if ($dn -match '^(Microsoft 365|Microsoft OneNote|OneNote)\s*-\s*[a-z]{2}-[a-z]{2}$') { VStamp "[arp] $dn" }
+        } catch {}
+      }
+    }
+  } catch {}
+}
+
 # If ARP still shows Click-to-Run language components, use ODT to remove them
 $arpLangs = Get-InstalledC2RLanguages | Where-Object { $_ -ne $Keep.ToLower() }
 # If languages still present, skip winget/Appx and go to verification
 $odtNeedsRetry = $false
-if ($arpLangs.Count -gt 0) {
-  Stamp "[odt] Detected Click-to-Run language components still present: $($arpLangs -join ', ')"
+if ($arpLangs.Count -gt 0 -or $AggressiveODT) {
+  if ($arpLangs.Count -gt 0) {
+    Stamp "[odt] Detected Click-to-Run language components still present: $($arpLangs -join ', ')"
+  } else {
+    Stamp "[odt] Aggressive mode requested; attempting ODT removal even though detection is empty."
+  }
   Remove-WithODT -KeepLang $Keep -WhatIf:$WhatIf
 }
 
@@ -502,8 +533,22 @@ $remainingAppx = Get-AppxPackage -AllUsers | Where-Object {
 
 $remainingC2R = Get-InstalledC2RLanguages | Where-Object { $_ -ne $Keep.ToLower() }
 
+# Additional ARP-style sweep for leftover DisplayName entries
+$remainingARPDisplay = @()
+try {
+  $uninstRoots = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')
+  foreach ($root in $uninstRoots) {
+    Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
+      try {
+        $dn = (Get-ItemProperty $_.PsPath -Name DisplayName -ErrorAction Stop).DisplayName
+        if ($dn -match '^(Microsoft 365|Microsoft OneNote|OneNote)\s*-\s*[a-z]{2}-[a-z]{2}$' -and $dn -notmatch "\b$([regex]::Escape($Keep))\b") { $remainingARPDisplay += $dn }
+      } catch {}
+    }
+  }
+} catch {}
+
 Stamp "Summary: removed via winget = $($wingetRemoved.Count), via appx = $($appxRemoved.Count)"
-if ($remainingWinget.Count -eq 0 -and $remainingAppx.Count -eq 0 -and $remainingC2R.Count -eq 0) {
+if ($remainingWinget.Count -eq 0 -and $remainingAppx.Count -eq 0 -and $remainingC2R.Count -eq 0 -and $remainingARPDisplay.Count -eq 0) {
   Stamp "Remaining language packs (MS365/OneNote): none"
 } else {
   if ($remainingWinget) {
@@ -517,6 +562,10 @@ if ($remainingWinget.Count -eq 0 -and $remainingAppx.Count -eq 0 -and $remaining
   if ($remainingC2R) {
     Stamp "Remaining Click-to-Run languages (by detection):"
     $remainingC2R | ForEach-Object { Stamp "  $_" }
+  }
+  if ($remainingARPDisplay) {
+    Stamp "Remaining ARP DisplayName entries (pattern-based):"
+    $remainingARPDisplay | ForEach-Object { Stamp "  $_" }
   }
 }
 
