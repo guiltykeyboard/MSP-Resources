@@ -2,7 +2,10 @@
 param(
   [string]$Keep = 'en-us',
   [switch]$WhatIf,
-  [switch]$SelfUpdated  # internal guard to avoid update loops
+  [switch]$SelfUpdated,              # internal guard to avoid update loops
+  [string]$RepoRelPath,              # optional: allow RMM launchers to pass repo path without error
+  [string]$Repo = 'guiltykeyboard/MSP-Resources',
+  [string]$Ref  = 'main'
 )
 
 
@@ -105,7 +108,14 @@ $_.Value)" }
   }
 }
 
-Invoke-SelfUpdateIfOutdated -RepoRelPath 'ConnectWise-RMM-Asio/Scripts/Windows/M365Cleanup.ps1' -Skip:$SelfUpdated
+
+# Allow launcher-provided overrides but default to this script's known path
+$__RepoRelPath = if ($PSBoundParameters.ContainsKey('RepoRelPath') -and $RepoRelPath) {
+  $RepoRelPath
+} else {
+  'ConnectWise-RMM-Asio/Scripts/Windows/M365Cleanup.ps1'
+}
+Invoke-SelfUpdateIfOutdated -RepoRelPath $__RepoRelPath -Repo $Repo -Ref $Ref -Skip:$SelfUpdated
 
 # --- RMM / Console detection --------------------------------------------------
 function Test-IsCWRMM {
