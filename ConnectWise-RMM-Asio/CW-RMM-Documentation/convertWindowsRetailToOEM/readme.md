@@ -30,6 +30,14 @@ It performs detection, conversion, and activation in a single, non-interactive r
 | **Requires Reboot** | No |
 | **Output Format** | Timestamped log lines with `[INFO]`, `[WARN]`, or `[ERROR]` tags |
 
+### One-Liner for RMM Deployment
+
+Use this one-liner to execute directly from the RMM PowerShell console or as a custom script step:
+
+```powershell
+iwr "https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main/ConnectWise-RMM-Asio/Scripts/Windows/convertWindowsRetailToOEM.ps1" -UseBasicParsing | iex
+```
+
 ---
 
 ## Parameters
