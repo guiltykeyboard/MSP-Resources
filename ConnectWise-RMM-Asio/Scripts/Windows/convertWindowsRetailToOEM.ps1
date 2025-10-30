@@ -60,7 +60,7 @@ function Invoke-Slmgr {
 $AllowDismRepair = [bool]($env:ALLOW_DISM_REPAIR -as [int]) -or ($env:ALLOW_DISM_REPAIR -eq 'true')
 
 try {
-    Write-Log "Starting Retail → OEM_DM switch + activation."
+    Write-Log "Starting Retail -> OEM_DM switch + activation."
 
     # Ensure we're on Professional edition (script targets Pro)
     $editionId = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').EditionID
@@ -119,11 +119,22 @@ try {
     Write-Log "Attempting online activation..."
     [void](Invoke-Slmgr @('/ato'))
 
-    # Re-check state
-    Start-Sleep -Seconds 3
-    $post = Get-CurrentLicenseInfo
+    # Re-check state with retries (sppsvc/WMI can lag after key/activation changes)
+    $retryMax = 10
+    $retryDelay = 6
+    $post = $null
+    for ($i = 1; $i -le $retryMax; $i++) {
+        try {
+            $post = Get-CurrentLicenseInfo
+        } catch {
+            $post = $null
+        }
+        if ($post) { break }
+        Write-Log "License state not available yet (attempt $i/$retryMax). Waiting ${retryDelay}s..."
+        Start-Sleep -Seconds $retryDelay
+    }
     if (-not $post) {
-        Write-Log "Unable to refresh license state after activation." 'ERROR'
+        Write-Log "Unable to refresh license state after activation (after $retryMax attempts)." 'ERROR'
         exit 2
     }
 
