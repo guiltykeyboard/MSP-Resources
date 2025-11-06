@@ -177,7 +177,11 @@ if [[ "${CLIENT}" == "acme" ]]; then
     log "Installing acme.sh..."
     curl https://get.acme.sh | sh -s email=admin@"${FQDN#*.}"
     # shellcheck disable=SC1091
-    [[ -f /root/.bashrc ]] && source /root/.bashrc || true
+    if [[ -f /root/.bashrc ]]; then
+      set +u
+      source /root/.bashrc || true
+      set -u
+    fi
   else
     log "acme.sh already installed."
   fi
