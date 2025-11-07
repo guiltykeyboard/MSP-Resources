@@ -540,16 +540,43 @@ ENVEOF
 
       # Common wildcard symlink step (safe to run even if links already exist)
       if [[ "${DNS_DOM_SEL-}" == "2" ]]; then
-        WILDCARD_DIR="/root/.acme.sh/*.${BASE_DOMAIN}"
+        WILDCARD_DOM="*.${BASE_DOMAIN}"
+        WILDCARD_DIR="/root/.acme.sh/${WILDCARD_DOM}"
         if [[ -d "${WILDCARD_DIR}" ]]; then
-          if [[ "${FQDN}" != "${BASE_DOMAIN}" ]]; then
-            ln -sfn "${WILDCARD_DIR}" "/root/.acme.sh/${FQDN}" && log "Linked /root/.acme.sh/${FQDN} -> ${WILDCARD_DIR}"
-          fi
-          for H in "unifi.${BASE_DOMAIN}" "uos.${BASE_DOMAIN}"; do
-            if [[ "${H}" != "${FQDN}" ]]; then
-              ln -sfn "${WILDCARD_DIR}" "/root/.acme.sh/${H}" && log "Linked /root/.acme.sh/${H} -> ${WILDCARD_DIR}"
+          # Ensure directory links for common hostnames
+          for H in "${FQDN}" "unifi.${BASE_DOMAIN}" "uos.${BASE_DOMAIN}"; do
+            if [[ "${H}" != "${BASE_DOMAIN}" ]]; then
+              ln -sfn "${WILDCARD_DIR}" "/root/.acme.sh/${H}"
+              log "Linked /root/.acme.sh/${H} -> ${WILDCARD_DIR}"
+
+              # Resolve source files from the wildcard directory (avoid quoting the glob so it expands)
+              KEY_SRC=$(ls -1 ${WILDCARD_DIR}/*.${BASE_DOMAIN}.key 2>/dev/null | head -n1)
+              CER_SRC=$(ls -1 ${WILDCARD_DIR}/*.${BASE_DOMAIN}.cer 2>/dev/null | head -n1)
+              CHAIN_SRC="${WILDCARD_DIR}/fullchain.cer"
+
+              if [[ -n "${KEY_SRC}" && -f "${KEY_SRC}" ]]; then
+                ln -sfn "${KEY_SRC}" "/root/.acme.sh/${H}/private.key"
+                ln -sfn "${KEY_SRC}" "/root/.acme.sh/${H}/${H}.key"
+                log "Linked key files for ${H}"
+              else
+                warn "Wildcard key not found in ${WILDCARD_DIR} (*.${BASE_DOMAIN}.key)"
+              fi
+
+              if [[ -f "${CHAIN_SRC}" ]]; then
+                ln -sfn "${CHAIN_SRC}" "/root/.acme.sh/${H}/fullchain.cer"
+                log "Linked fullchain for ${H}"
+              else
+                warn "Expected chain not found: ${CHAIN_SRC}"
+              fi
+
+              if [[ -n "${CER_SRC}" && -f "${CER_SRC}" ]]; then
+                ln -sfn "${CER_SRC}" "/root/.acme.sh/${H}/${H}.cer"
+                log "Linked leaf cert for ${H}"
+              fi
             fi
           done
+        else
+          warn "Wildcard directory not found at ${WILDCARD_DIR}"
         fi
       fi
       ;;
