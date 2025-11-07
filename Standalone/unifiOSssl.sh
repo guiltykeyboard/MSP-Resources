@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # unifiOSssl.sh
+# Saved update: 2025-11-07T19:45Z (no logic changes; finalized DNS-01 reuse + wildcard symlink fixes)
 # Purpose: Obtain Let's Encrypt cert (acme.sh or Certbot), renew automatically, and
 #          import into UniFi OS Server via community importer on each renewal.
 #
@@ -34,6 +35,23 @@ need_root() {
 log()  { echo "[+] $*"; }
 warn() { echo "[!] $*" >&2; }
 err()  { echo "[x] $*" >&2; exit 1; }
+
+# Create/refresh a symlink but do not fail if src==dest or if it already points correctly
+safe_link() {
+  local src="$1" dest="$2"
+  # Ensure parent dir exists (handles non-symlink parent paths)
+  mkdir -p "$(dirname -- "$dest")" 2>/dev/null || true
+  # If dest exists and already resolves to src, do nothing
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    local rsrc rdest
+    rsrc="$(readlink -f -- "$src" 2>/dev/null || echo "$src")"
+    rdest="$(readlink -f -- "$dest" 2>/dev/null || echo "")"
+    if [[ -n "$rdest" && "$rsrc" == "$rdest" ]]; then
+      return 0
+    fi
+  fi
+  ln -sfn "$src" "$dest" 2>/dev/null || true
+}
 
 # Validate FQDN (very basic)
 require_fqdn() {
@@ -255,11 +273,12 @@ if [[ "${CLIENT}" == "acme" ]]; then
         if [[ "${DNS_DOM_SEL}" == "2" ]]; then
           WILDCARD_DIR="/root/.acme.sh/*.${BASE_DOMAIN}"
           if [[ -d "${WILDCARD_DIR}" ]]; then
-            [[ "${FQDN}" != "${BASE_DOMAIN}" ]] && ln -sfn "${WILDCARD_DIR}" "/root/.acme.sh/${FQDN}" && log "Linked /root/.acme.sh/${FQDN} -> ${WILDCARD_DIR}"
+            [[ "${FQDN}" != "${BASE_DOMAIN}" ]] && safe_link "${WILDCARD_DIR}" "/root/.acme.sh/${FQDN}"; log "Linked /root/.acme.sh/${FQDN} -> ${WILDCARD_DIR}"
             for H in "unifi.${BASE_DOMAIN}" "uos.${BASE_DOMAIN}"; do
-              [[ "${H}" != "${FQDN}" ]] && ln -sfn "${WILDCARD_DIR}" "/root/.acme.sh/${H}" && log "Linked /root/.acme.sh/${H} -> ${WILDCARD_DIR}"
+              [[ "${H}" != "${FQDN}" ]] && safe_link "${WILDCARD_DIR}" "/root/.acme.sh/${H}"; log "Linked /root/.acme.sh/${H} -> ${WILDCARD_DIR}"
             done
           fi
+          WILDCARD_LINKS_DONE=1
         fi
       else
         # ---- No existing cert: prompt for DNS provider and perform issuance ----
@@ -539,14 +558,15 @@ ENVEOF
       fi
 
       # Common wildcard symlink step (safe to run even if links already exist)
-      if [[ "${DNS_DOM_SEL-}" == "2" ]]; then
+      if [[ "${DNS_DOM_SEL-}" == "2" && -z "${WILDCARD_LINKS_DONE-}" ]]; then
         WILDCARD_DOM="*.${BASE_DOMAIN}"
         WILDCARD_DIR="/root/.acme.sh/${WILDCARD_DOM}"
         if [[ -d "${WILDCARD_DIR}" ]]; then
+          set +e
           # Ensure directory links for common hostnames
           for H in "${FQDN}" "unifi.${BASE_DOMAIN}" "uos.${BASE_DOMAIN}"; do
             if [[ "${H}" != "${BASE_DOMAIN}" ]]; then
-              ln -sfn "${WILDCARD_DIR}" "/root/.acme.sh/${H}"
+              safe_link "${WILDCARD_DIR}" "/root/.acme.sh/${H}"
               log "Linked /root/.acme.sh/${H} -> ${WILDCARD_DIR}"
 
               # Resolve source files from the wildcard directory (avoid quoting the glob so it expands)
@@ -555,26 +575,27 @@ ENVEOF
               CHAIN_SRC="${WILDCARD_DIR}/fullchain.cer"
 
               if [[ -n "${KEY_SRC}" && -f "${KEY_SRC}" ]]; then
-                ln -sfn "${KEY_SRC}" "/root/.acme.sh/${H}/private.key"
-                ln -sfn "${KEY_SRC}" "/root/.acme.sh/${H}/${H}.key"
+                safe_link "${KEY_SRC}" "/root/.acme.sh/${H}/private.key"
+                safe_link "${KEY_SRC}" "/root/.acme.sh/${H}/${H}.key"
                 log "Linked key files for ${H}"
               else
                 warn "Wildcard key not found in ${WILDCARD_DIR} (*.${BASE_DOMAIN}.key)"
               fi
 
               if [[ -f "${CHAIN_SRC}" ]]; then
-                ln -sfn "${CHAIN_SRC}" "/root/.acme.sh/${H}/fullchain.cer"
+                safe_link "${CHAIN_SRC}" "/root/.acme.sh/${H}/fullchain.cer"
                 log "Linked fullchain for ${H}"
               else
                 warn "Expected chain not found: ${CHAIN_SRC}"
               fi
 
               if [[ -n "${CER_SRC}" && -f "${CER_SRC}" ]]; then
-                ln -sfn "${CER_SRC}" "/root/.acme.sh/${H}/${H}.cer"
+                safe_link "${CER_SRC}" "/root/.acme.sh/${H}/${H}.cer"
                 log "Linked leaf cert for ${H}"
               fi
             fi
           done
+          set -e
         else
           warn "Wildcard directory not found at ${WILDCARD_DIR}"
         fi
@@ -677,6 +698,7 @@ Links made:   ${DNS_DOM_SEL:+$([[ "${DNS_DOM_SEL}" == "2" ]] && echo "${FQDN}, u
 Cert path:    ${CERT_DIR}
 Importer:     ${IMPORTER_PATH}
 Renewals:     ${RENEW_NOTE}
+Notes:        $([[ -n "${WILDCARD_LINKS_DONE-}" ]] && echo "Existing cert detected; DNS prompts and issuance skipped.")
 
 Namecheap creds: stored in /root/.acme.sh/account.conf (persisted by acme.sh)
 Env file:        ${NAMECHEAP_ENV}
