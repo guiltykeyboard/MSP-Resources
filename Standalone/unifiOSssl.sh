@@ -224,259 +224,9 @@ if [[ "${CLIENT}" == "acme" ]]; then
 
     dns01)
       echo
-      log "DNS-01 selected. Choose your DNS provider:"
-      echo "  1) Namecheap"
-      echo "  2) Cloudflare"
-      echo "  3) GoDaddy"
-      echo "  4) AWS Route53"
-      echo "  5) Google Cloud DNS"
-      echo "  6) DigitalOcean"
-      echo "  7) Custom (enter acme.sh provider code, e.g., dns_gd)"
-      echo "  8) Help: Open acme.sh DNS provider codes KB (then enter code)"
-      echo "  9) Azure DNS"
-      echo " 10) Hetzner DNS"
-      echo " 11) Porkbun"
-      echo " 12) Gandi"
-      echo " 13) Linode"
-      echo " 14) NameSilo"
-      echo " 15) DNSPod (Tencent)"
-      echo " 16) OVH"
-      echo " 17) Vultr"
-      echo " 18) DreamHost"
-      echo " 19) Name.com"
-      echo " 20) NS1"
-      read -rp "Selection [1-20]: " DNS_PROV_SEL
-      case "${DNS_PROV_SEL}" in
-        1)
-          DNS_PROVIDER="namecheap"; DNS_FLAG="dns_namecheap"
-          read -rp "Namecheap USERNAME (login): " NC_USER
-          read -srp "Namecheap API KEY (input hidden): " NC_KEY; echo
-          read -rp "Namecheap SOURCE IP (exact IP you whitelisted in Namecheap): " NC_SRCIP
-          [[ -n "${NC_USER}" && -n "${NC_KEY}" && -n "${NC_SRCIP}" ]] || err "All Namecheap fields are required."
-          mkdir -p "/root/.secrets"; NAMECHEAP_ENV="/root/.secrets/namecheap.env"
-          cat > "${NAMECHEAP_ENV}" <<ENVEOF
-NAMECHEAP_USERNAME=${NC_USER}
-NAMECHEAP_API_KEY=${NC_KEY}
-NAMECHEAP_SOURCEIP=${NC_SRCIP}
-ENVEOF
-          chmod 600 "${NAMECHEAP_ENV}"; set -a; source "${NAMECHEAP_ENV}"; set +a
-          ;;
-        2)
-          DNS_PROVIDER="cloudflare"; DNS_FLAG="dns_cf"
-          CF_ENV="/root/.secrets/cloudflare.env"
-          read -srp "Cloudflare API Token (Zones:Read, DNS:Edit) (input hidden): " CF_TOKEN; echo
-          read -rp "Cloudflare Account ID (optional; Enter to skip): " CF_ACCOUNT_ID
-          mkdir -p "/root/.secrets"
-          cat > "${CF_ENV}" <<ENVEOF
-CF_Token=${CF_TOKEN}
-CF_Account_ID=${CF_ACCOUNT_ID}
-ENVEOF
-          chmod 600 "${CF_ENV}"; set -a; source "${CF_ENV}"; set +a
-          ;;
-        3)
-          DNS_PROVIDER="godaddy"; DNS_FLAG="dns_gd"
-          GD_ENV="/root/.secrets/godaddy.env"
-          read -rp "GoDaddy API Key: " GD_Key
-          read -srp "GoDaddy API Secret (input hidden): " GD_Secret; echo
-          [[ -n "${GD_Key}" && -n "${GD_Secret}" ]] || err "GoDaddy Key and Secret are required."
-          mkdir -p "/root/.secrets"
-          cat > "${GD_ENV}" <<ENVEOF
-GD_Key=${GD_Key}
-GD_Secret=${GD_Secret}
-ENVEOF
-          chmod 600 "${GD_ENV}"; set -a; source "${GD_ENV}"; set +a
-          ;;
-        4)
-          DNS_PROVIDER="route53"; DNS_FLAG="dns_aws"
-          AWS_ENV="/root/.secrets/aws-route53.env"
-          read -rp "AWS Access Key ID: " AWS_ACCESS_KEY_ID
-          read -srp "AWS Secret Access Key (input hidden): " AWS_SECRET_ACCESS_KEY; echo
-          read -rp "AWS Region (optional, e.g., us-east-1; Enter to skip): " AWS_REGION
-          [[ -n "${AWS_ACCESS_KEY_ID}" && -n "${AWS_SECRET_ACCESS_KEY}" ]] || err "AWS credentials are required."
-          mkdir -p "/root/.secrets"
-          cat > "${AWS_ENV}" <<ENVEOF
-AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-AWS_REGION=${AWS_REGION}
-ENVEOF
-          chmod 600 "${AWS_ENV}"; set -a; source "${AWS_ENV}"; set +a
-          ;;
-        5)
-          DNS_PROVIDER="gcloud"; DNS_FLAG="dns_gcloud"
-          GC_ENV="/root/.secrets/gcloud.env"
-          read -rp "Path to Google service-account JSON (will be referenced): " GC_JSON
-          [[ -f "${GC_JSON}" ]] || err "Service-account JSON not found at ${GC_JSON}"
-          mkdir -p "/root/.secrets"
-          cat > "${GC_ENV}" <<ENVEOF
-GOOGLE_APPLICATION_CREDENTIALS=${GC_JSON}
-ENVEOF
-          chmod 600 "${GC_ENV}"; set -a; source "${GC_ENV}"; set +a
-          ;;
-        6)
-          DNS_PROVIDER="digitalocean"; DNS_FLAG="dns_dgon"
-          DO_ENV="/root/.secrets/digitalocean.env"
-          read -srp "DigitalOcean API Token (input hidden): " DO_API_TOKEN; echo
-          [[ -n "${DO_API_TOKEN}" ]] || err "DigitalOcean API token is required."
-          mkdir -p "/root/.secrets"
-          cat > "${DO_ENV}" <<ENVEOF
-DO_API_TOKEN=${DO_API_TOKEN}
-ENVEOF
-          chmod 600 "${DO_ENV}"; set -a; source "${DO_ENV}"; set +a
-          ;;
-        7)
-          read -rp "Enter full acme.sh DNS provider code (e.g., dns_gd, dns_ali, dns_azure): " DNS_FLAG
-          [[ "${DNS_FLAG}" =~ ^dns_ ]] || err "Provider code must start with 'dns_'."
-          DNS_PROVIDER="${DNS_FLAG#dns_}"
-          read -rp "Path to env file to source for this provider (leave blank to skip): " CUSTOM_ENV
-          if [[ -n "${CUSTOM_ENV}" ]]; then
-            [[ -f "${CUSTOM_ENV}" ]] || err "Env file not found at ${CUSTOM_ENV}"
-            set -a; source "${CUSTOM_ENV}"; set +a
-          fi
-          ;;
-        8)
-          echo "\nProvider codes reference: https://github.com/acmesh-official/acme.sh/wiki/dnsapi"
-          echo "(Open the URL to find your provider's code and required env vars.)"
-          read -rp "Enter provider code from the KB (e.g., dns_hetzner, dns_azure, dns_linode): " DNS_FLAG
-          [[ "${DNS_FLAG}" =~ ^dns_ ]] || err "Provider code must start with 'dns_'."
-          DNS_PROVIDER="${DNS_FLAG#dns_}"
-          read -rp "Path to env file to source for this provider (leave blank to skip): " CUSTOM_ENV
-          if [[ -n "${CUSTOM_ENV}" ]]; then
-            [[ -f "${CUSTOM_ENV}" ]] || err "Env file not found at ${CUSTOM_ENV}"
-            set -a; source "${CUSTOM_ENV}"; set +a
-          fi
-          ;;
-        9)
-          DNS_PROVIDER="azure"; DNS_FLAG="dns_azure"
-          AZ_ENV="/root/.secrets/azure.env"
-          read -rp "Azure Tenant ID: " AZUREDNS_TENANTID
-          read -rp "Azure App (Client) ID: " AZUREDNS_APPID
-          read -srp "Azure Client Secret (input hidden): " AZUREDNS_CLIENTSECRET; echo
-          read -rp "Azure Subscription ID: " AZUREDNS_SUBSCRIPTIONID
-          read -rp "Azure Resource Group (DNS zone RG): " AZUREDNS_RESOURCE_GROUP
-          mkdir -p "/root/.secrets"
-          cat > "${AZ_ENV}" <<ENVEOF
-AZUREDNS_TENANTID=${AZUREDNS_TENANTID}
-AZUREDNS_APPID=${AZUREDNS_APPID}
-AZUREDNS_CLIENTSECRET=${AZUREDNS_CLIENTSECRET}
-AZUREDNS_SUBSCRIPTIONID=${AZUREDNS_SUBSCRIPTIONID}
-AZUREDNS_RESOURCE_GROUP=${AZUREDNS_RESOURCE_GROUP}
-ENVEOF
-          chmod 600 "${AZ_ENV}"; set -a; source "${AZ_ENV}"; set +a
-          ;;
-        10)
-          DNS_PROVIDER="hetzner"; DNS_FLAG="dns_hetzner"
-          HZ_ENV="/root/.secrets/hetzner.env"
-          read -srp "Hetzner API Token (input hidden): " HETZNER_Token; echo
-          mkdir -p "/root/.secrets"; cat > "${HZ_ENV}" <<ENVEOF
-HETZNER_Token=${HETZNER_Token}
-ENVEOF
-          chmod 600 "${HZ_ENV}"; set -a; source "${HZ_ENV}"; set +a
-          ;;
-        11)
-          DNS_PROVIDER="porkbun"; DNS_FLAG="dns_porkbun"
-          PB_ENV="/root/.secrets/porkbun.env"
-          read -rp "Porkbun API Key: " PORKBUN_API_KEY
-          read -srp "Porkbun Secret Key (input hidden): " PORKBUN_SECRET_API_KEY; echo
-          mkdir -p "/root/.secrets"; cat > "${PB_ENV}" <<ENVEOF
-PORKBUN_API_KEY=${PORKBUN_API_KEY}
-PORKBUN_SECRET_API_KEY=${PORKBUN_SECRET_API_KEY}
-ENVEOF
-          chmod 600 "${PB_ENV}"; set -a; source "${PB_ENV}"; set +a
-          ;;
-        12)
-          DNS_PROVIDER="gandi"; DNS_FLAG="dns_gandi"
-          GA_ENV="/root/.secrets/gandi.env"
-          read -srp "Gandi Live API Key (input hidden): " GANDI_LIVE_API_KEY; echo
-          mkdir -p "/root/.secrets"; cat > "${GA_ENV}" <<ENVEOF
-GANDI_LIVE_API_KEY=${GANDI_LIVE_API_KEY}
-ENVEOF
-          chmod 600 "${GA_ENV}"; set -a; source "${GA_ENV}"; set +a
-          ;;
-        13)
-          DNS_PROVIDER="linode"; DNS_FLAG="dns_linode"
-          LI_ENV="/root/.secrets/linode.env"
-          read -srp "Linode Personal Access Token (input hidden): " LINODE_V4_API_KEY; echo
-          mkdir -p "/root/.secrets"; cat > "${LI_ENV}" <<ENVEOF
-LINODE_V4_API_KEY=${LINODE_V4_API_KEY}
-ENVEOF
-          chmod 600 "${LI_ENV}"; set -a; source "${LI_ENV}"; set +a
-          ;;
-        14)
-          DNS_PROVIDER="namesilo"; DNS_FLAG="dns_namesilo"
-          NSL_ENV="/root/.secrets/namesilo.env"
-          read -srp "NameSilo API Key (input hidden): " Namesilo_Key; echo
-          mkdir -p "/root/.secrets"; cat > "${NSL_ENV}" <<ENVEOF
-Namesilo_Key=${Namesilo_Key}
-ENVEOF
-          chmod 600 "${NSL_ENV}"; set -a; source "${NSL_ENV}"; set +a
-          ;;
-        15)
-          DNS_PROVIDER="dnspod"; DNS_FLAG="dns_dp"
-          DP_ENV="/root/.secrets/dnspod.env"
-          read -rp "DNSPod (Tencent) ID: " DP_Id
-          read -srp "DNSPod (Tencent) Key (input hidden): " DP_Key; echo
-          mkdir -p "/root/.secrets"; cat > "${DP_ENV}" <<ENVEOF
-DP_Id=${DP_Id}
-DP_Key=${DP_Key}
-ENVEOF
-          chmod 600 "${DP_ENV}"; set -a; source "${DP_ENV}"; set +a
-          ;;
-        16)
-          DNS_PROVIDER="ovh"; DNS_FLAG="dns_ovh"
-          OVH_ENV="/root/.secrets/ovh.env"
-          read -rp "OVH Application Key (AK): " OVH_AK
-          read -srp "OVH Application Secret (AS) (input hidden): " OVH_AS; echo
-          read -rp "OVH Consumer Key (CK): " OVH_CK
-          read -rp "OVH Endpoint (optional, e.g., ovh-eu; Enter to skip): " OVH_END_POINT
-          mkdir -p "/root/.secrets"; cat > "${OVH_ENV}" <<ENVEOF
-OVH_AK=${OVH_AK}
-OVH_AS=${OVH_AS}
-OVH_CK=${OVH_CK}
-OVH_END_POINT=${OVH_END_POINT}
-ENVEOF
-          chmod 600 "${OVH_ENV}"; set -a; source "${OVH_ENV}"; set +a
-          ;;
-        17)
-          DNS_PROVIDER="vultr"; DNS_FLAG="dns_vultr"
-          VU_ENV="/root/.secrets/vultr.env"
-          read -srp "Vultr API Key (input hidden): " VULTR_API_KEY; echo
-          mkdir -p "/root/.secrets"; cat > "${VU_ENV}" <<ENVEOF
-VULTR_API_KEY=${VULTR_API_KEY}
-ENVEOF
-          chmod 600 "${VU_ENV}"; set -a; source "${VU_ENV}"; set +a
-          ;;
-        18)
-          DNS_PROVIDER="dreamhost"; DNS_FLAG="dns_dreamhost"
-          DH_ENV="/root/.secrets/dreamhost.env"
-          read -srp "DreamHost API Key (input hidden): " DH_API_KEY; echo
-          mkdir -p "/root/.secrets"; cat > "${DH_ENV}" <<ENVEOF
-DH_API_KEY=${DH_API_KEY}
-ENVEOF
-          chmod 600 "${DH_ENV}"; set -a; source "${DH_ENV}"; set +a
-          ;;
-        19)
-          DNS_PROVIDER="namecom"; DNS_FLAG="dns_namecom"
-          NMC_ENV="/root/.secrets/namecom.env"
-          read -rp "Name.com Username: " Namecom_Username
-          read -srp "Name.com API Token (input hidden): " Namecom_Token; echo
-          mkdir -p "/root/.secrets"; cat > "${NMC_ENV}" <<ENVEOF
-Namecom_Username=${Namecom_Username}
-Namecom_Token=${Namecom_Token}
-ENVEOF
-          chmod 600 "${NMC_ENV}"; set -a; source "${NMC_ENV}"; set +a
-          ;;
-        20)
-          DNS_PROVIDER="nsone"; DNS_FLAG="dns_nsone"
-          NS1_ENV="/root/.secrets/ns1.env"
-          read -srp "NS1 API Key (input hidden): " NS1_Key; echo
-          mkdir -p "/root/.secrets"; cat > "${NS1_ENV}" <<ENVEOF
-NS1_Key=${NS1_Key}
-ENVEOF
-          chmod 600 "${NS1_ENV}"; set -a; source "${NS1_ENV}"; set +a
-          ;;
-        *) err "Invalid DNS provider selection." ;;
-      esac
+      log "DNS-01 selected."
 
+      # ---- Ask domain scope first so we can reuse existing certs without prompting for DNS creds ----
       echo
       log "Choose domains for issuance:"
       echo "  1) Single host: ${FQDN}"
@@ -488,58 +238,320 @@ ENVEOF
           require_apex "${BASE_DOMAIN}"
           DOM_ARGS=( -d "*.${BASE_DOMAIN}" -d "${BASE_DOMAIN}" )
           ISSUED_DOMAINS="*.${BASE_DOMAIN}, ${BASE_DOMAIN}"
+          CERT_DIR_RUN="/root/.acme.sh/*.${BASE_DOMAIN}"
           ;;
         *)
           require_fqdn "${FQDN}"
           DOM_ARGS=( -d "${FQDN}" )
           ISSUED_DOMAINS="${FQDN}"
+          CERT_DIR_RUN="/root/.acme.sh/${FQDN}"
           ;;
       esac
 
-      unset SUDO_GID SUDO_UID SUDO_USER || true
-      export HOME=/root
-      if [[ "${DNS_DOM_SEL-}" == "2" ]]; then
-        CERT_DIR_RUN="/root/.acme.sh/*.${BASE_DOMAIN}"
+      # If a matching cert already exists, skip provider prompts & issuance. We'll symlink (for wildcard) and import later.
+      if [[ -f "${CERT_DIR_RUN}/fullchain.cer" ]]; then
+        warn "Existing certificate detected at ${CERT_DIR_RUN}. Skipping DNS provider prompts and issuance."
+        # Wildcard compatibility links so importer can find the cert by common hostnames
+        if [[ "${DNS_DOM_SEL}" == "2" ]]; then
+          WILDCARD_DIR="/root/.acme.sh/*.${BASE_DOMAIN}"
+          if [[ -d "${WILDCARD_DIR}" ]]; then
+            [[ "${FQDN}" != "${BASE_DOMAIN}" ]] && ln -sfn "${WILDCARD_DIR}" "/root/.acme.sh/${FQDN}" && log "Linked /root/.acme.sh/${FQDN} -> ${WILDCARD_DIR}"
+            for H in "unifi.${BASE_DOMAIN}" "uos.${BASE_DOMAIN}"; do
+              [[ "${H}" != "${FQDN}" ]] && ln -sfn "${WILDCARD_DIR}" "/root/.acme.sh/${H}" && log "Linked /root/.acme.sh/${H} -> ${WILDCARD_DIR}"
+            done
+          fi
+        fi
       else
-        CERT_DIR_RUN="/root/.acme.sh/${FQDN}"
-      fi
-      set +e
-      "${ACME_SH_BIN}" --issue \
-        --dns ${DNS_FLAG} \
-        "${DOM_ARGS[@]}" \
-        --keylength 4096 \
-        --dnssleep 180 \
-        --debug 2 \
-        --reloadcmd "env UNIFI_HOSTNAME=${FQDN} ${IMPORTER_PATH} --provider=acme ${DNS_PROVIDER:+--dns=${DNS_PROVIDER}}"
-      RC=$?
-      set -e
-      if [[ $RC -ne 0 ]]; then
-        if [[ -f "${CERT_DIR_RUN}/fullchain.cer" ]]; then
-          warn "acme.sh returned non-zero, but an existing cert was found at ${CERT_DIR_RUN}. Proceeding with import."
-        else
-          err "acme.sh DNS-01 issuance failed."
+        # ---- No existing cert: prompt for DNS provider and perform issuance ----
+        echo
+        log "DNS-01 selected. Choose your DNS provider:"
+        echo "  1) Namecheap"
+        echo "  2) Cloudflare"
+        echo "  3) GoDaddy"
+        echo "  4) AWS Route53"
+        echo "  5) Google Cloud DNS"
+        echo "  6) DigitalOcean"
+        echo "  7) Custom (enter acme.sh provider code, e.g., dns_gd)"
+        echo "  8) Help: Open acme.sh DNS provider codes KB (then enter code)"
+        echo "  9) Azure DNS"
+        echo " 10) Hetzner DNS"
+        echo " 11) Porkbun"
+        echo " 12) Gandi"
+        echo " 13) Linode"
+        echo " 14) NameSilo"
+        echo " 15) DNSPod (Tencent)"
+        echo " 16) OVH"
+        echo " 17) Vultr"
+        echo " 18) DreamHost"
+        echo " 19) Name.com"
+        echo " 20) NS1"
+        read -rp "Selection [1-20]: " DNS_PROV_SEL
+        case "${DNS_PROV_SEL}" in
+          1)
+            DNS_PROVIDER="namecheap"; DNS_FLAG="dns_namecheap"
+            read -rp "Namecheap USERNAME (login): " NC_USER
+            read -srp "Namecheap API KEY (input hidden): " NC_KEY; echo
+            read -rp "Namecheap SOURCE IP (exact IP you whitelisted in Namecheap): " NC_SRCIP
+            [[ -n "${NC_USER}" && -n "${NC_KEY}" && -n "${NC_SRCIP}" ]] || err "All Namecheap fields are required."
+            mkdir -p "/root/.secrets"; NAMECHEAP_ENV="/root/.secrets/namecheap.env"
+            cat > "${NAMECHEAP_ENV}" <<ENVEOF
+NAMECHEAP_USERNAME=${NC_USER}
+NAMECHEAP_API_KEY=${NC_KEY}
+NAMECHEAP_SOURCEIP=${NC_SRCIP}
+ENVEOF
+            chmod 600 "${NAMECHEAP_ENV}"; set -a; source "${NAMECHEAP_ENV}"; set +a
+            ;;
+          2)
+            DNS_PROVIDER="cloudflare"; DNS_FLAG="dns_cf"
+            CF_ENV="/root/.secrets/cloudflare.env"
+            read -srp "Cloudflare API Token (Zones:Read, DNS:Edit) (input hidden): " CF_TOKEN; echo
+            read -rp "Cloudflare Account ID (optional; Enter to skip): " CF_ACCOUNT_ID
+            mkdir -p "/root/.secrets"
+            cat > "${CF_ENV}" <<ENVEOF
+CF_Token=${CF_TOKEN}
+CF_Account_ID=${CF_ACCOUNT_ID}
+ENVEOF
+            chmod 600 "${CF_ENV}"; set -a; source "${CF_ENV}"; set +a
+            ;;
+          3)
+            DNS_PROVIDER="godaddy"; DNS_FLAG="dns_gd"
+            GD_ENV="/root/.secrets/godaddy.env"
+            read -rp "GoDaddy API Key: " GD_Key
+            read -srp "GoDaddy API Secret (input hidden): " GD_Secret; echo
+            [[ -n "${GD_Key}" && -n "${GD_Secret}" ]] || err "GoDaddy Key and Secret are required."
+            mkdir -p "/root/.secrets"
+            cat > "${GD_ENV}" <<ENVEOF
+GD_Key=${GD_Key}
+GD_Secret=${GD_Secret}
+ENVEOF
+            chmod 600 "${GD_ENV}"; set -a; source "${GD_ENV}"; set +a
+            ;;
+          4)
+            DNS_PROVIDER="route53"; DNS_FLAG="dns_aws"
+            AWS_ENV="/root/.secrets/aws-route53.env"
+            read -rp "AWS Access Key ID: " AWS_ACCESS_KEY_ID
+            read -srp "AWS Secret Access Key (input hidden): " AWS_SECRET_ACCESS_KEY; echo
+            read -rp "AWS Region (optional, e.g., us-east-1; Enter to skip): " AWS_REGION
+            [[ -n "${AWS_ACCESS_KEY_ID}" && -n "${AWS_SECRET_ACCESS_KEY}" ]] || err "AWS credentials are required."
+            mkdir -p "/root/.secrets"
+            cat > "${AWS_ENV}" <<ENVEOF
+AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+AWS_REGION=${AWS_REGION}
+ENVEOF
+            chmod 600 "${AWS_ENV}"; set -a; source "${AWS_ENV}"; set +a
+            ;;
+          5)
+            DNS_PROVIDER="gcloud"; DNS_FLAG="dns_gcloud"
+            GC_ENV="/root/.secrets/gcloud.env"
+            read -rp "Path to Google service-account JSON (will be referenced): " GC_JSON
+            [[ -f "${GC_JSON}" ]] || err "Service-account JSON not found at ${GC_JSON}"
+            mkdir -p "/root/.secrets"
+            cat > "${GC_ENV}" <<ENVEOF
+GOOGLE_APPLICATION_CREDENTIALS=${GC_JSON}
+ENVEOF
+            chmod 600 "${GC_ENV}"; set -a; source "${GC_ENV}"; set +a
+            ;;
+          6)
+            DNS_PROVIDER="digitalocean"; DNS_FLAG="dns_dgon"
+            DO_ENV="/root/.secrets/digitalocean.env"
+            read -srp "DigitalOcean API Token (input hidden): " DO_API_TOKEN; echo
+            [[ -n "${DO_API_TOKEN}" ]] || err "DigitalOcean API token is required."
+            mkdir -p "/root/.secrets"
+            cat > "${DO_ENV}" <<ENVEOF
+DO_API_TOKEN=${DO_API_TOKEN}
+ENVEOF
+            chmod 600 "${DO_ENV}"; set -a; source "${DO_ENV}"; set +a
+            ;;
+          7)
+            read -rp "Enter full acme.sh DNS provider code (e.g., dns_gd, dns_ali, dns_azure): " DNS_FLAG
+            [[ "${DNS_FLAG}" =~ ^dns_ ]] || err "Provider code must start with 'dns_'."
+            DNS_PROVIDER="${DNS_FLAG#dns_}"
+            read -rp "Path to env file to source for this provider (leave blank to skip): " CUSTOM_ENV
+            if [[ -n "${CUSTOM_ENV}" ]]; then
+              [[ -f "${CUSTOM_ENV}" ]] || err "Env file not found at ${CUSTOM_ENV}"
+              set -a; source "${CUSTOM_ENV}"; set +a
+            fi
+            ;;
+          8)
+            echo "\nProvider codes reference: https://github.com/acmesh-official/acme.sh/wiki/dnsapi"
+            echo "(Open the URL to find your provider's code and required env vars.)"
+            read -rp "Enter provider code from the KB (e.g., dns_hetzner, dns_azure, dns_linode): " DNS_FLAG
+            [[ "${DNS_FLAG}" =~ ^dns_ ]] || err "Provider code must start with 'dns_'."
+            DNS_PROVIDER="${DNS_FLAG#dns_}"
+            read -rp "Path to env file to source for this provider (leave blank to skip): " CUSTOM_ENV
+            if [[ -n "${CUSTOM_ENV}" ]]; then
+              [[ -f "${CUSTOM_ENV}" ]] || err "Env file not found at ${CUSTOM_ENV}"
+              set -a; source "${CUSTOM_ENV}"; set +a
+            fi
+            ;;
+          9)
+            DNS_PROVIDER="azure"; DNS_FLAG="dns_azure"
+            AZ_ENV="/root/.secrets/azure.env"
+            read -rp "Azure Tenant ID: " AZUREDNS_TENANTID
+            read -rp "Azure App (Client) ID: " AZUREDNS_APPID
+            read -srp "Azure Client Secret (input hidden): " AZUREDNS_CLIENTSECRET; echo
+            read -rp "Azure Subscription ID: " AZUREDNS_SUBSCRIPTIONID
+            read -rp "Azure Resource Group (DNS zone RG): " AZUREDNS_RESOURCE_GROUP
+            mkdir -p "/root/.secrets"
+            cat > "${AZ_ENV}" <<ENVEOF
+AZUREDNS_TENANTID=${AZUREDNS_TENANTID}
+AZUREDNS_APPID=${AZUREDNS_APPID}
+AZUREDNS_CLIENTSECRET=${AZUREDNS_CLIENTSECRET}
+AZUREDNS_SUBSCRIPTIONID=${AZUREDNS_SUBSCRIPTIONID}
+AZUREDNS_RESOURCE_GROUP=${AZUREDNS_RESOURCE_GROUP}
+ENVEOF
+            chmod 600 "${AZ_ENV}"; set -a; source "${AZ_ENV}"; set +a
+            ;;
+          10)
+            DNS_PROVIDER="hetzner"; DNS_FLAG="dns_hetzner"
+            HZ_ENV="/root/.secrets/hetzner.env"
+            read -srp "Hetzner API Token (input hidden): " HETZNER_Token; echo
+            mkdir -p "/root/.secrets"; cat > "${HZ_ENV}" <<ENVEOF
+HETZNER_Token=${HETZNER_Token}
+ENVEOF
+            chmod 600 "${HZ_ENV}"; set -a; source "${HZ_ENV}"; set +a
+            ;;
+          11)
+            DNS_PROVIDER="porkbun"; DNS_FLAG="dns_porkbun"
+            PB_ENV="/root/.secrets/porkbun.env"
+            read -rp "Porkbun API Key: " PORKBUN_API_KEY
+            read -srp "Porkbun Secret Key (input hidden): " PORKBUN_SECRET_API_KEY; echo
+            mkdir -p "/root/.secrets"; cat > "${PB_ENV}" <<ENVEOF
+PORKBUN_API_KEY=${PORKBUN_API_KEY}
+PORKBUN_SECRET_API_KEY=${PORKBUN_SECRET_API_KEY}
+ENVEOF
+            chmod 600 "${PB_ENV}"; set -a; source "${PB_ENV}"; set +a
+            ;;
+          12)
+            DNS_PROVIDER="gandi"; DNS_FLAG="dns_gandi"
+            GA_ENV="/root/.secrets/gandi.env"
+            read -srp "Gandi Live API Key (input hidden): " GANDI_LIVE_API_KEY; echo
+            mkdir -p "/root/.secrets"; cat > "${GA_ENV}" <<ENVEOF
+GANDI_LIVE_API_KEY=${GANDI_LIVE_API_KEY}
+ENVEOF
+            chmod 600 "${GA_ENV}"; set -a; source "${GA_ENV}"; set +a
+            ;;
+          13)
+            DNS_PROVIDER="linode"; DNS_FLAG="dns_linode"
+            LI_ENV="/root/.secrets/linode.env"
+            read -srp "Linode Personal Access Token (input hidden): " LINODE_V4_API_KEY; echo
+            mkdir -p "/root/.secrets"; cat > "${LI_ENV}" <<ENVEOF
+LINODE_V4_API_KEY=${LINODE_V4_API_KEY}
+ENVEOF
+            chmod 600 "${LI_ENV}"; set -a; source "${LI_ENV}"; set +a
+            ;;
+          14)
+            DNS_PROVIDER="namesilo"; DNS_FLAG="dns_namesilo"
+            NSL_ENV="/root/.secrets/namesilo.env"
+            read -srp "NameSilo API Key (input hidden): " Namesilo_Key; echo
+            mkdir -p "/root/.secrets"; cat > "${NSL_ENV}" <<ENVEOF
+Namesilo_Key=${Namesilo_Key}
+ENVEOF
+            chmod 600 "${NSL_ENV}"; set -a; source "${NSL_ENV}"; set +a
+            ;;
+          15)
+            DNS_PROVIDER="dnspod"; DNS_FLAG="dns_dp"
+            DP_ENV="/root/.secrets/dnspod.env"
+            read -rp "DNSPod (Tencent) ID: " DP_Id
+            read -srp "DNSPod (Tencent) Key (input hidden): " DP_Key; echo
+            mkdir -p "/root/.secrets"; cat > "${DP_ENV}" <<ENVEOF
+DP_Id=${DP_Id}
+DP_Key=${DP_Key}
+ENVEOF
+            chmod 600 "${DP_ENV}"; set -a; source "${DP_ENV}"; set +a
+            ;;
+          16)
+            DNS_PROVIDER="ovh"; DNS_FLAG="dns_ovh"
+            OVH_ENV="/root/.secrets/ovh.env"
+            read -rp "OVH Application Key (AK): " OVH_AK
+            read -srp "OVH Application Secret (AS) (input hidden): " OVH_AS; echo
+            read -rp "OVH Consumer Key (CK): " OVH_CK
+            read -rp "OVH Endpoint (optional, e.g., ovh-eu; Enter to skip): " OVH_END_POINT
+            mkdir -p "/root/.secrets"; cat > "${OVH_ENV}" <<ENVEOF
+OVH_AK=${OVH_AK}
+OVH_AS=${OVH_AS}
+OVH_CK=${OVH_CK}
+OVH_END_POINT=${OVH_END_POINT}
+ENVEOF
+            chmod 600 "${OVH_ENV}"; set -a; source "${OVH_ENV}"; set +a
+            ;;
+          17)
+            DNS_PROVIDER="vultr"; DNS_FLAG="dns_vultr"
+            VU_ENV="/root/.secrets/vultr.env"
+            read -srp "Vultr API Key (input hidden): " VULTR_API_KEY; echo
+            mkdir -p "/root/.secrets"; cat > "${VU_ENV}" <<ENVEOF
+VULTR_API_KEY=${VULTR_API_KEY}
+ENVEOF
+            chmod 600 "${VU_ENV}"; set -a; source "${VU_ENV}"; set +a
+            ;;
+          18)
+            DNS_PROVIDER="dreamhost"; DNS_FLAG="dns_dreamhost"
+            DH_ENV="/root/.secrets/dreamhost.env"
+            read -srp "DreamHost API Key (input hidden): " DH_API_KEY; echo
+            mkdir -p "/root/.secrets"; cat > "${DH_ENV}" <<ENVEOF
+DH_API_KEY=${DH_API_KEY}
+ENVEOF
+            chmod 600 "${DH_ENV}"; set -a; source "${DH_ENV}"; set +a
+            ;;
+          19)
+            DNS_PROVIDER="namecom"; DNS_FLAG="dns_namecom"
+            NMC_ENV="/root/.secrets/namecom.env"
+            read -rp "Name.com Username: " Namecom_Username
+            read -srp "Name.com API Token (input hidden): " Namecom_Token; echo
+            mkdir -p "/root/.secrets"; cat > "${NMC_ENV}" <<ENVEOF
+Namecom_Username=${Namecom_Username}
+Namecom_Token=${Namecom_Token}
+ENVEOF
+            chmod 600 "${NMC_ENV}"; set -a; source "${NMC_ENV}"; set +a
+            ;;
+          20)
+            DNS_PROVIDER="nsone"; DNS_FLAG="dns_nsone"
+            NS1_ENV="/root/.secrets/ns1.env"
+            read -srp "NS1 API Key (input hidden): " NS1_Key; echo
+            mkdir -p "/root/.secrets"; cat > "${NS1_ENV}" <<ENVEOF
+NS1_Key=${NS1_Key}
+ENVEOF
+            chmod 600 "${NS1_ENV}"; set -a; source "${NS1_ENV}"; set +a
+            ;;
+          *) err "Invalid DNS provider selection." ;;
+        esac
+
+        unset SUDO_GID SUDO_UID SUDO_USER || true
+        export HOME=/root
+        set +e
+        "${ACME_SH_BIN}" --issue \
+          --dns ${DNS_FLAG} \
+          "${DOM_ARGS[@]}" \
+          --keylength 4096 \
+          --dnssleep 180 \
+          --debug 2 \
+          --reloadcmd "env UNIFI_HOSTNAME=${FQDN} ${IMPORTER_PATH} --provider=acme ${DNS_PROVIDER:+--dns=${DNS_PROVIDER}}"
+        RC=$?
+        set -e
+        if [[ $RC -ne 0 ]]; then
+          if [[ -f "${CERT_DIR_RUN}/fullchain.cer" ]]; then
+            warn "acme.sh returned non-zero, but an existing cert was found at ${CERT_DIR_RUN}. Proceeding with import."
+          else
+            err "acme.sh DNS-01 issuance failed."
+          fi
         fi
       fi
 
-  # If we issued a wildcard (*.BASE_DOMAIN), acme.sh stores files under /root/.acme.sh/*.BASE_DOMAIN
-  # Some importer scripts look for /root/.acme.sh/<FQDN>. Create a symlink so both paths work.
-  if [[ "${METHOD}" == "dns01" && "${DNS_DOM_SEL-}" == "2" ]]; then
-    WILDCARD_DIR="/root/.acme.sh/*.${BASE_DOMAIN}"
-    if [[ -d "${WILDCARD_DIR}" ]]; then
-      # Always link the chosen FQDN
-      if [[ "${FQDN}" != "${BASE_DOMAIN}" ]]; then
-        ln -sfn "${WILDCARD_DIR}" "/root/.acme.sh/${FQDN}"
-        log "Linked /root/.acme.sh/${FQDN} -> ${WILDCARD_DIR}"
-      fi
-      # Also link common hostnames that may point here
-      for H in "unifi.${BASE_DOMAIN}" "uos.${BASE_DOMAIN}"; do
-        if [[ "${H}" != "${FQDN}" ]]; then
-          ln -sfn "${WILDCARD_DIR}" "/root/.acme.sh/${H}"
-          log "Linked /root/.acme.sh/${H} -> ${WILDCARD_DIR}"
+      # Common wildcard symlink step (safe to run even if links already exist)
+      if [[ "${DNS_DOM_SEL-}" == "2" ]]; then
+        WILDCARD_DIR="/root/.acme.sh/*.${BASE_DOMAIN}"
+        if [[ -d "${WILDCARD_DIR}" ]]; then
+          if [[ "${FQDN}" != "${BASE_DOMAIN}" ]]; then
+            ln -sfn "${WILDCARD_DIR}" "/root/.acme.sh/${FQDN}" && log "Linked /root/.acme.sh/${FQDN} -> ${WILDCARD_DIR}"
+          fi
+          for H in "unifi.${BASE_DOMAIN}" "uos.${BASE_DOMAIN}"; do
+            if [[ "${H}" != "${FQDN}" ]]; then
+              ln -sfn "${WILDCARD_DIR}" "/root/.acme.sh/${H}" && log "Linked /root/.acme.sh/${H} -> ${WILDCARD_DIR}"
+            fi
+          done
         fi
-      done
-    fi
-  fi
+      fi
       ;;
   esac
 
