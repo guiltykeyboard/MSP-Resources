@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Replace 4d87fcc90eaca7484be73a219d23595b0ee7f6a9 placeholders in scripts with the current commit's short SHA.
+Replace 39a954ba248f0302f069495ef0eaac97a1e9d1bc placeholders in scripts with the current commit's short SHA.
 Runs in CI after the original push completes, then pushes a follow-up commit
 with [skip ci] to avoid infinite loops.
 """
@@ -34,10 +34,10 @@ for path in REPO_ROOT.rglob("*"):
   except Exception:
     continue
 
-  if "4d87fcc90eaca7484be73a219d23595b0ee7f6a9" not in text:
+  if "39a954ba248f0302f069495ef0eaac97a1e9d1bc" not in text:
     continue
 
-  new_text = text.replace("4d87fcc90eaca7484be73a219d23595b0ee7f6a9", SHORT_SHA)
+  new_text = text.replace("39a954ba248f0302f069495ef0eaac97a1e9d1bc", SHORT_SHA)
   if new_text != text:
     path.write_text(new_text, encoding="utf-8")
     print(f"Stamped {path.relative_to(REPO_ROOT)} -> {SHORT_SHA}")
