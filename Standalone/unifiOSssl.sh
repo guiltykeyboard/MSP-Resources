@@ -12,7 +12,7 @@
 #    NAMECHEAP_USERNAME / NAMECHEAP_API_KEY / NAMECHEAP_SOURCEIP into
 #    /root/.acme.sh/account.conf so renewals run unattended. You can verify with:
 #      grep NAMECHEAP /root/.acme.sh/account.conf
-#  - UniFi importer: we pull from your fork to avoid upstream changes breaking
+#  - UniFi importer: we pull from my fork to avoid upstream changes breaking
 #    behavior; adjust IMPORTER_URL below if you move it.
 #  - Namecheap env file: this script stores API creds at /root/.secrets/namecheap.env
 #    and sources it for acme.sh so renewals remain unattended.
@@ -182,6 +182,11 @@ fi
 curl -fsSL "${IMPORTER_URL}" -o "${IMPORTER_PATH}"
 chmod +x "${IMPORTER_PATH}"
 
+# Set importer hostname to the FQDN you entered (if the importer exposes UNIFI_HOSTNAME)
+if grep -q '^UNIFI_HOSTNAME=' "${IMPORTER_PATH}"; then
+  sed -i -E "s|^UNIFI_HOSTNAME=.*$|UNIFI_HOSTNAME=\"${FQDN}\"|" "${IMPORTER_PATH}"
+fi
+
 # -----------------------------
 # Path A: acme.sh (recommended)
 # -----------------------------
@@ -214,7 +219,7 @@ if [[ "${CLIENT}" == "acme" ]]; then
         --standalone \
         -d "${FQDN}" \
         --keylength 4096 \
-        --reloadcmd "${IMPORTER_PATH} --provider=acme" || err "acme.sh HTTP-01 issuance failed."
+        --reloadcmd "env UNIFI_HOSTNAME=${FQDN} ${IMPORTER_PATH} --provider=acme" || err "acme.sh HTTP-01 issuance failed."
       ;;
 
     dns01)
@@ -264,7 +269,29 @@ ENVEOF
         --dns dns_namecheap \
         "${DOM_ARGS[@]}" \
         --keylength 4096 \
-        --reloadcmd "${IMPORTER_PATH} --provider=acme --dns=namecheap" || err "acme.sh DNS-01 issuance failed."
+        --dnssleep 180 \
+        --debug 2 \
+        --reloadcmd "env UNIFI_HOSTNAME=${FQDN} ${IMPORTER_PATH} --provider=acme --dns=namecheap" || err "acme.sh DNS-01 issuance failed."
+
+  # If we issued a wildcard (*.BASE_DOMAIN), acme.sh stores files under /root/.acme.sh/*.BASE_DOMAIN
+  # Some importer scripts look for /root/.acme.sh/<FQDN>. Create a symlink so both paths work.
+  if [[ "${METHOD}" == "dns01" && "${DNS_DOM_SEL-}" == "2" ]]; then
+    WILDCARD_DIR="/root/.acme.sh/*.${BASE_DOMAIN}"
+    if [[ -d "${WILDCARD_DIR}" ]]; then
+      # Always link the chosen FQDN
+      if [[ "${FQDN}" != "${BASE_DOMAIN}" ]]; then
+        ln -sfn "${WILDCARD_DIR}" "/root/.acme.sh/${FQDN}"
+        log "Linked /root/.acme.sh/${FQDN} -> ${WILDCARD_DIR}"
+      fi
+      # Also link common hostnames that may point here
+      for H in "unifi.${BASE_DOMAIN}" "uos.${BASE_DOMAIN}"; do
+        if [[ "${H}" != "${FQDN}" ]]; then
+          ln -sfn "${WILDCARD_DIR}" "/root/.acme.sh/${H}"
+          log "Linked /root/.acme.sh/${H} -> ${WILDCARD_DIR}"
+        fi
+      done
+    fi
+  fi
       ;;
   esac
 
@@ -272,9 +299,9 @@ ENVEOF
   [[ -n "${ISSUED_DOMAINS-}" ]] && log "Issued domains: ${ISSUED_DOMAINS}"
   log "Importing certificate into UniFi OS Server (acme.sh provider)..."
   if [[ "${METHOD}" == "dns01" ]]; then
-    "${IMPORTER_PATH}" --provider=acme --dns=namecheap --verbose || err "Importer failed."
+    UNIFI_HOSTNAME="${FQDN}" "${IMPORTER_PATH}" --provider=acme --dns=namecheap --verbose || err "Importer failed."
   else
-    "${IMPORTER_PATH}" --provider=acme --verbose || err "Importer failed."
+    UNIFI_HOSTNAME="${FQDN}" "${IMPORTER_PATH}" --provider=acme --verbose || err "Importer failed."
   fi
 
   # acme.sh installs a cron automatically; the --reloadcmd will run on renewals
@@ -329,7 +356,7 @@ else
   fi
 
   log "Importing certificate into UniFi OS Server (certbot provider)..."
-  "${IMPORTER_PATH}" --provider=certbot --verbose || err "Importer failed."
+  UNIFI_HOSTNAME="${FQDN}" "${IMPORTER_PATH}" --provider=certbot --verbose || err "Importer failed."
 
   # Create Certbot deploy hook for future renewals
   log "Creating Certbot deploy hook at ${DEPLOY_HOOK_CERTBOT} ..."
@@ -355,6 +382,8 @@ Domain:       ${FQDN}
 Client:       ${CLIENT}
 Validation:   ${METHOD}
 Domains:      ${ISSUED_DOMAINS:-${FQDN}}
+Symlink:      ${DNS_DOM_SEL:+$([[ "${DNS_DOM_SEL}" == "2" ]] && echo "/root/.acme.sh/${FQDN} -> /root/.acme.sh/*.${BASE_DOMAIN}" )}
+Links made:   ${DNS_DOM_SEL:+$([[ "${DNS_DOM_SEL}" == "2" ]] && echo "${FQDN}, unifi.${BASE_DOMAIN}, uos.${BASE_DOMAIN}")}
 Cert path:    ${CERT_DIR}
 Importer:     ${IMPORTER_PATH}
 Renewals:     ${RENEW_NOTE}
