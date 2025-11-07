@@ -35,6 +35,19 @@ log()  { echo "[+] $*"; }
 warn() { echo "[!] $*" >&2; }
 err()  { echo "[x] $*" >&2; exit 1; }
 
+# Validate FQDN (very basic)
+require_fqdn() {
+  local d="$1"
+  [[ "$d" =~ ^([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$ ]] || err "Domain must be a valid FQDN (e.g., unifi.example.com)."
+}
+
+# Validate apex/root domain (e.g., example.com)
+require_apex() {
+  local d="$1"
+  [[ "$d" =~ ^([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$ ]] || err "Domain must be a valid base domain (e.g., example.com)."
+  [[ "$d" != *"*"* ]] || err "Do not include wildcards here; enter just the base domain (e.g., example.com)."
+}
+
 # -----------------------------
 # Paths / constants
 # -----------------------------
@@ -132,6 +145,7 @@ log "  4) Import now and auto-import on future renewals"
 # 1) Ask for FQDN
 read -rp "Enter the fully-qualified domain name for UniFi (e.g., unifi.example.com): " FQDN
 [[ -n "${FQDN}" ]] || err "Domain cannot be empty."
+require_fqdn "${FQDN}"
 
 # 2) Choose ACME client
 cat <<EOF
@@ -193,6 +207,9 @@ if [[ "${CLIENT}" == "acme" ]]; then
   case "${METHOD}" in
     http01)
       warn "HTTP-01 (standalone): ensure TCP 80 is free during issuance."
+      command -v socat >/dev/null 2>&1 || apt-get update -y && apt-get install -y socat
+      unset SUDO_GID SUDO_UID SUDO_USER || true
+      export HOME=/root
       "${ACME_SH_BIN}" --issue \
         --standalone \
         -d "${FQDN}" \
@@ -204,8 +221,8 @@ if [[ "${CLIENT}" == "acme" ]]; then
       echo
       log "DNS-01 selected. For Namecheap, set API credentials."
       read -rp "Namecheap USERNAME (login): " NC_USER
-      read -rp "Namecheap API KEY: " NC_KEY
-      read -rp "Namecheap SOURCE IP (the IP you whitelist in Namecheap API access): " NC_SRCIP
+      read -srp "Namecheap API KEY (input hidden): " NC_KEY; echo
+      read -rp "Namecheap SOURCE IP (exact IP you whitelisted in Namecheap): " NC_SRCIP
       [[ -n "${NC_USER}" && -n "${NC_KEY}" && -n "${NC_SRCIP}" ]] || err "All Namecheap fields are required."
 
       # Persist and source Namecheap credentials for unattended renewals
@@ -221,23 +238,28 @@ ENVEOF
       source "${NAMECHEAP_ENV}"
       set +a
 
-      BASE_DOMAIN="${FQDN#*.}"
       echo
       log "Choose domains for issuance:"
       echo "  1) Single host: ${FQDN}"
-      echo "  2) Wildcard + apex: *.${BASE_DOMAIN} and ${BASE_DOMAIN} (dns-01 only)"
+      echo "  2) Wildcard + apex: *.base-domain and base-domain (dns-01 only)"
       read -rp "Selection [1/2]: " DNS_DOM_SEL
       case "${DNS_DOM_SEL}" in
         2)
+          read -rp "Enter base domain for wildcard (e.g., example.com): " BASE_DOMAIN
+          require_apex "${BASE_DOMAIN}"
           DOM_ARGS=( -d "*.${BASE_DOMAIN}" -d "${BASE_DOMAIN}" )
           ISSUED_DOMAINS="*.${BASE_DOMAIN}, ${BASE_DOMAIN}"
           ;;
         *)
+          # Single host uses the FQDN provided at the start
+          require_fqdn "${FQDN}"
           DOM_ARGS=( -d "${FQDN}" )
           ISSUED_DOMAINS="${FQDN}"
           ;;
       esac
 
+      unset SUDO_GID SUDO_UID SUDO_USER || true
+      export HOME=/root
       "${ACME_SH_BIN}" --issue \
         --dns dns_namecheap \
         "${DOM_ARGS[@]}" \
