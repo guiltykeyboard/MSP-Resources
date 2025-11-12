@@ -228,6 +228,61 @@ function New-SnmpV2CPacket([string]$community,[byte[]]$pdu) {
 }
 
 # ---------------------------
+# Helper: Build a Xerox‑safe SNMPv2c GET for a single OID
+# (explicit ASN.1/BER with short-length forms where applicable)
+# ---------------------------
+function New-SnmpV2cGetPacketSimple {
+    param(
+        [Parameter(Mandatory=$true)][string]$Community,
+        [Parameter(Mandatory=$true)][string]$Oid,
+        [Parameter(Mandatory=$true)][int]$RequestId
+    )
+    # Encode version (v2c = 1)
+    $ver    = ,0x02 + ,0x01 + ,0x01
+    # Encode community (ASCII, no BOM)
+    $cbytes = [System.Text.Encoding]::GetEncoding("us-ascii").GetBytes($Community)
+    $comm   = ,0x04 + ,([byte]$cbytes.Length) + $cbytes
+    # Encode OID
+    function _EncodeOid([string]$oid) {
+        $parts = $oid.Split('.') | ForEach-Object {[uint32]$_}
+        $first = [byte]($parts[0]*40 + $parts[1])
+        $body  = New-Object System.Collections.Generic.List[byte]
+        $body.Add($first) | Out-Null
+        for ($i=2; $i -lt $parts.Length; $i++) {
+            $v = [uint32]$parts[$i]
+            $stack = New-Object System.Collections.Generic.List[byte]
+            $stack.Add([byte]($v -band 0x7F)) | Out-Null
+            $v = $v -shr 7
+            while ($v -gt 0) { $stack.Add([byte](0x80 -bor ($v -band 0x7F))) | Out-Null; $v = $v -shr 7 }
+            $arr = $stack.ToArray(); [Array]::Reverse($arr)
+            $body.AddRange($arr)
+        }
+        $content = $body.ToArray()
+        return ,0x06 + ,([byte]$content.Length) + $content
+    }
+    # INTEGER encoder (positive only for our fields)
+    function _EncInt([int]$v) {
+        if ($v -lt 0) { throw "RequestId must be non-negative" }
+        if ($v -lt 0x80) { return ,0x02 + ,0x01 + ,([byte]$v) }
+        $tmp = New-Object System.Collections.Generic.List[byte]
+        $n = $v
+        while ($n -gt 0) { $tmp.Add([byte]($n -band 0xFF)); $n = $n -shr 8 }
+        $arr = $tmp.ToArray(); [Array]::Reverse($arr)
+        if (($arr[0] -band 0x80) -ne 0) { $arr = ,0x00 + $arr } # ensure positive sign
+        return ,0x02 + ,([byte]$arr.Length) + $arr
+    }
+    # VarBind: OID + NULL
+    $vb = (_EncodeOid $Oid) + ,0x05 + ,0x00
+    $vbl = ,0x30 + ,([byte]$vb.Length) + $vb
+    # PDU: GetRequest (0xA0) :: request-id, error-status=0, error-index=0, varbindlist
+    $pduCore = (_EncInt $RequestId) + (_EncInt 0) + (_EncInt 0) + $vbl
+    $pdu     = ,0xA0 + ,([byte]$pduCore.Length) + $pduCore
+    # Message: SEQUENCE(version, community, pdu)
+    $msgCore = $ver + $comm + $pdu
+    return ,0x30 + ,([byte]$msgCore.Length) + $msgCore
+}
+
+# ---------------------------
 # SNMP Send/Receive
 # ---------------------------
 function Invoke-SnmpRequest {
@@ -238,18 +293,24 @@ function Invoke-SnmpRequest {
         [string[]]$Oids,
         [int]$TimeoutMs = 2000
     )
-    $udp = [System.Net.Sockets.UdpClient]::new()
+    # Force IPv4 and explicit timeout
+    $udp = [System.Net.Sockets.UdpClient]::new([System.Net.Sockets.AddressFamily]::InterNetwork)
     $udp.Client.ReceiveTimeout = $TimeoutMs
-    $udp.Connect($TargetIp,161)
+    $udp.Connect($TargetIp, 161)
     try {
         $reqId = New-RequestId
-        $varBinds = @()
-        foreach ($oid in $Oids) { $varBinds += (New-SnmpVarBind $oid (ConvertTo-BerNull)) }
-        $pdu = New-SnmpGetPdu $PduTag $reqId $varBinds
-        $packet = New-SnmpV2CPacket $Community $pdu
+        # For the common "single GET for sysDescr" path, use the strict/simple encoder
+        if ($PduTag -eq 0xA0 -and $Oids.Count -eq 1) {
+            $packet = New-SnmpV2cGetPacketSimple -Community $Community -Oid $Oids[0] -RequestId $reqId
+        } else {
+            # Fall back to the generic builder already defined in the script
+            $varBinds = @()
+            foreach ($oid in $Oids) { $varBinds += (New-SnmpVarBind $oid (ConvertTo-BerNull)) }
+            $pdu = New-SnmpGetPdu $PduTag $reqId $varBinds
+            $packet = New-SnmpV2CPacket $Community $pdu
+        }
         [void]$udp.Send($packet, $packet.Length)
-
-        $remoteEP = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any,0)
+        $remoteEP = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
         $resp = $udp.Receive([ref]$remoteEP)
         return ,$resp
     } catch {
