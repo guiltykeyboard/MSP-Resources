@@ -108,6 +108,7 @@ function Get-LocalIPv4Context {
 }
 
 $local = Get-LocalIPv4Context -DestinationIp $ip
+$script:local = $local
 Write-Host ("Local endpoint for this test: {0}" -f $local.CIDR) -ForegroundColor DarkCyan
 Write-Host ("Local network: {0}" -f $local.NetworkCIDR) -ForegroundColor DarkCyan
 Write-Host ("Gateway: {0} (Interface: {1})" -f $local.Gateway, $local.InterfaceAlias) -ForegroundColor DarkCyan
@@ -404,31 +405,38 @@ function Invoke-SnmpRequest {
         if ($script:snmpSocketState.UdpClient) {
             try { $script:snmpSocketState.UdpClient.Close() } catch {}
         }
-        if ($bindIp) {
-            $localEp = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Parse($bindIp), $srcPort)
-            $udp = [System.Net.Sockets.UdpClient]::new($localEp)
-        } else {
-            $udp = [System.Net.Sockets.UdpClient]::new([System.Net.Sockets.AddressFamily]::InterNetwork)
-            # Bind explicitly to 0.0.0.0:srcPort if no specific IP is known
-            $udp.Client.Bind([System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, $srcPort))
-        }
+        # Build local endpoint and bind explicitly
+        $addr = $bindIp
+        if (-not $addr -or [string]::IsNullOrWhiteSpace($addr)) { $addr = '0.0.0.0' }
+        $localEp = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Parse($addr), $srcPort)
+
+        $udp = New-Object System.Net.Sockets.UdpClient
+        $udp.ExclusiveAddressUse = $false
+        $udp.Client.SetSocketOption([System.Net.Sockets.SocketOptionLevel]::Socket, [System.Net.Sockets.SocketOptionName]::ReuseAddress, $true)
+        $udp.Client.Bind($localEp)
         $udp.Client.SendBufferSize = 4096
         $udp.Client.ReceiveBufferSize = 4096
-        $script:snmpSocketState.BoundIp = $bindIp
-        $script:snmpSocketState.SrcPort = $srcPort
-        $script:snmpSocketState.TargetIp = $TargetIp
-        $script:snmpSocketState.UdpClient = $udp
+        $udp.Client.ReceiveTimeout = [Math]::Max($TimeoutMs, 2000)
         $udp.Connect($TargetIp, 161)
+
+        $script:snmpSocketState.BoundIp   = $bindIp
+        $script:snmpSocketState.SrcPort   = $srcPort
+        $script:snmpSocketState.TargetIp  = $TargetIp
+        $script:snmpSocketState.UdpClient = $udp
+
         if ($env:SNMP_DEBUG -eq '1') {
             $lep = $udp.Client.LocalEndPoint.ToString()
             Write-Host "[DBG] Local UDP endpoint: $lep" -ForegroundColor DarkGray
         }
     } else {
-        # Ensure we are still connected to the intended remote
+        # Ensure we are still connected to the intended remote and honor timeout
         try { $udp.Connect($TargetIp, 161) } catch {}
+        $udp.Client.ReceiveTimeout = [Math]::Max($TimeoutMs, 2000)
+        if ($env:SNMP_DEBUG -eq '1') {
+            $lep = $udp.Client.LocalEndPoint.ToString()
+            Write-Host "[DBG] Local UDP endpoint: $lep" -ForegroundColor DarkGray
+        }
     }
-    # Always honor current timeout per call
-    $udp.Client.ReceiveTimeout = [Math]::Max($TimeoutMs, 2000)
 
     # Build packet (strict simple encoder for Xerox)
     $reqId = Get-Random -Minimum 1 -Maximum 32767
