@@ -1,14 +1,4 @@
-# Test connectivity to the server on port 443
-Write-Host "Testing connectivity to $server on port 443..."
-$testConnection = Test-NetConnection -ComputerName $server -Port 443
-
-if ($testConnection.TcpTestSucceeded) {
-    Write-Host "Connection to $server on port 443 succeeded."
-} else {
-    Write-Host "Connection to $server on port 443 failed."
-}
-
-<#
+<# 
 .SYNOPSIS
 Test connectivity and SNMPv2c communication to a Xerox (or other SNMP-enabled) device.
 
@@ -26,6 +16,7 @@ The supplies walk is best-effort and stops when it leaves the base OID or reache
 - Requires no external modules; builds minimal SNMPv2c PDUs via .NET byte arrays.
 - UDP/162 (traps) is not queried (it’s for unsolicited messages).
 #>
+
 
 # ---------------------------
 # Input
@@ -50,13 +41,13 @@ function Get-LocalIPv4CIDRForDestination {
                  Sort-Object RouteMetric, PrefSource -Descending:$false | Select-Object -First 1
         if ($null -ne $route) {
             $ip = Get-NetIPAddress -InterfaceIndex $route.InterfaceIndex -AddressFamily IPv4 |
-                  Where-Object {$_.IPAddress -ne $null -and $_.SkipAsSource -ne $true} |
+                  Where-Object { $null -ne $_.IPAddress -and $_.SkipAsSource -ne $true } |
                   Sort-Object -Property PrefixLength -Descending:$true | Select-Object -First 1
             if ($ip) { return "{0}/{1}" -f $ip.IPAddress, $ip.PrefixLength }
         }
     } catch { }
     # Fallback: pick primary interface with default gateway
-    $primary = Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null } |
+    $primary = Get-NetIPConfiguration | Where-Object { $null -ne $_.IPv4DefaultGateway } |
                Select-Object -First 1
     if ($primary -and $primary.IPv4Address -and $primary.IPv4Address.IPAddress) {
         $addr = $primary.IPv4Address.IPAddress
@@ -87,7 +78,7 @@ if ($tcp.TcpTestSucceeded) {
 # ---------------------------
 # Helpers for SNMP encoding
 # ---------------------------
-function Encode-Length([int]$len) {
+function ConvertTo-BerLength([int]$len) {
     if ($len -lt 128) { return ,([byte]$len) }
     $bytes = New-Object System.Collections.Generic.List[byte]
     $tmp = [System.Collections.Generic.List[byte]]::new()
@@ -103,8 +94,7 @@ function Encode-Length([int]$len) {
     return $bytes.ToArray()
 }
 
-function Encode-Integer([int]$value) {
-    $bytes = [System.Collections.Generic.List[byte]]::new()
+function ConvertTo-BerInteger([int]$value) {
     $v = $value
     $tmp = [System.Collections.Generic.List[byte]]::new()
     if ($v -eq 0) { $tmp.Add(0x00) }
@@ -120,16 +110,16 @@ function Encode-Integer([int]$value) {
         $tmpArr = $tmp.ToArray(); [Array]::Reverse($tmpArr); $tmp = [System.Collections.Generic.List[byte]]::new(); $tmp.AddRange($tmpArr)
     }
     $content = $tmp.ToArray()
-    return ,0x02 + (Encode-Length $content.Length) + $content
+    return ,0x02 + (ConvertTo-BerLength $content.Length) + $content
 }
 
-function Encode-OctetString([byte[]]$bytes) {
-    return ,0x04 + (Encode-Length $bytes.Length) + $bytes
+function ConvertTo-BerOctetString([byte[]]$bytes) {
+    return ,0x04 + (ConvertTo-BerLength $bytes.Length) + $bytes
 }
 
-function Encode-Null() { return ,0x05,0x00 }
+function ConvertTo-BerNull() { return ,0x05,0x00 }
 
-function Encode-OID([string]$oid) {
+function ConvertTo-BerOid([string]$oid) {
     # Expect dotted string like 1.3.6.1.2.1.1.1.0
     $parts = $oid.Split('.') | ForEach-Object {[int]$_}
     if ($parts.Length -lt 2) { throw "Invalid OID: $oid" }
@@ -150,41 +140,41 @@ function Encode-OID([string]$oid) {
         $body.AddRange($arr)
     }
     $content = $body.ToArray()
-    return ,0x06 + (Encode-Length $content.Length) + $content
+    return ,0x06 + (ConvertTo-BerLength $content.Length) + $content
 }
 
-function Build-Sequence([byte[]]$content) {
-    return ,0x30 + (Encode-Length $content.Length) + $content
+function New-BerSequence([byte[]]$content) {
+    return ,0x30 + (ConvertTo-BerLength $content.Length) + $content
 }
 
 function New-RequestId() { return Get-Random -Minimum 100000 -Maximum 999999 }
 
-function Build-VarBind([string]$oid,[byte[]]$valueBytes) {
-    $vb = (Encode-OID $oid) + $valueBytes
-    return (Build-Sequence $vb)
+function New-SnmpVarBind([string]$oid,[byte[]]$valueBytes) {
+    $vb = (ConvertTo-BerOid $oid) + $valueBytes
+    return (New-BerSequence $vb)
 }
 
-function Build-VarBindList([byte[][]]$varBinds) {
+function New-SnmpVarBindList([byte[][]]$varBinds) {
     $content = @()
     foreach ($vb in $varBinds) { $content += $vb }
-    return (Build-Sequence $content)
+    return (New-BerSequence $content)
 }
 
-function Build-GetPDU([byte]$pduTag,[int]$requestId,[byte[][]]$varBinds) {
-    $pduContent = (Encode-Integer $requestId) + (Encode-Integer 0) + (Encode-Integer 0) + (Build-VarBindList $varBinds)
-    return ,$pduTag + (Encode-Length $pduContent.Length) + $pduContent
+function New-SnmpGetPdu([byte]$pduTag,[int]$requestId,[byte[][]]$varBinds) {
+    $pduContent = (ConvertTo-BerInteger $requestId) + (ConvertTo-BerInteger 0) + (ConvertTo-BerInteger 0) + (New-SnmpVarBindList $varBinds)
+    return ,$pduTag + (ConvertTo-BerLength $pduContent.Length) + $pduContent
 }
 
-function Build-SNMPv2cPacket([string]$community,[byte[]]$pdu) {
-    $version = (Encode-Integer 1)            # v2c
-    $comm    = (Encode-OctetString ([System.Text.Encoding]::ASCII.GetBytes($community)))
-    return (Build-Sequence ($version + $comm + $pdu))
+function New-SnmpV2CPacket([string]$community,[byte[]]$pdu) {
+    $version = (ConvertTo-BerInteger 1)            # v2c
+    $comm    = (ConvertTo-BerOctetString ([System.Text.Encoding]::ASCII.GetBytes($community)))
+    return (New-BerSequence ($version + $comm + $pdu))
 }
 
 # ---------------------------
 # SNMP Send/Receive
 # ---------------------------
-function Send-SNMPRequest {
+function Invoke-SnmpRequest {
     param(
         [string]$TargetIp,
         [string]$Community,
@@ -198,9 +188,9 @@ function Send-SNMPRequest {
     try {
         $reqId = New-RequestId
         $varBinds = @()
-        foreach ($oid in $Oids) { $varBinds += (Build-VarBind $oid (Encode-Null)) }
-        $pdu = Build-GetPDU $PduTag $reqId $varBinds
-        $packet = Build-SNMPv2cPacket $Community $pdu
+        foreach ($oid in $Oids) { $varBinds += (New-SnmpVarBind $oid (ConvertTo-BerNull)) }
+        $pdu = New-SnmpGetPdu $PduTag $reqId $varBinds
+        $packet = New-SnmpV2CPacket $Community $pdu
         [void]$udp.Send($packet, $packet.Length)
 
         $remoteEP = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any,0)
@@ -214,7 +204,7 @@ function Send-SNMPRequest {
 }
 
 # Basic BER helpers to parse enough for our needs (OID + value as string/integer)
-function Parse-Length([byte[]]$data,[ref]$offset) {
+function ConvertFrom-BerLength([byte[]]$data,[ref]$offset) {
     $lenByte = $data[$offset.Value]; $offset.Value++
     if (($lenByte -band 0x80) -eq 0) { return [int]$lenByte }
     $lenLen = $lenByte -band 0x7F
@@ -223,7 +213,7 @@ function Parse-Length([byte[]]$data,[ref]$offset) {
     return $len
 }
 
-function Parse-OID([byte[]]$data,[ref]$offset,[int]$len) {
+function ConvertFrom-BerOid([byte[]]$data,[ref]$offset,[int]$len) {
     $end = $offset.Value + $len
     $first = $data[$offset.Value]; $offset.Value++
     $oid0 = [int]([math]::Floor($first / 40))
@@ -240,9 +230,9 @@ function Parse-OID([byte[]]$data,[ref]$offset,[int]$len) {
     return ($parts -join '.')
 }
 
-function Parse-Value([byte[]]$data,[ref]$offset) {
+function ConvertFrom-BerValue([byte[]]$data,[ref]$offset) {
     $tag = $data[$offset.Value]; $offset.Value++
-    $len = Parse-Length $data ([ref]$offset)
+    $len = ConvertFrom-BerLength $data ([ref]$offset)
     switch ($tag) {
         0x04 { # Octet String
             $bytes = $data[$offset.Value..($offset.Value+$len-1)]
@@ -262,7 +252,7 @@ function Parse-Value([byte[]]$data,[ref]$offset) {
             return ,@("null", $null)
         }
         0x06 { # OID (rare as value)
-            $oid = Parse-OID $data ([ref]$offset) $len
+            $oid = ConvertFrom-BerOid $data ([ref]$offset) $len
             return ,@("oid",$oid)
         }
         default {
@@ -273,31 +263,31 @@ function Parse-Value([byte[]]$data,[ref]$offset) {
     }
 }
 
-function Parse-VarBinds([byte[]]$data) {
+function ConvertFrom-SnmpVarBinds([byte[]]$data) {
     # Minimal parse to reach VarBind list
     $off = 0
-    if ($data[$off] -ne 0x30) { return @() }; $off++; $ = Parse-Length $data ([ref]$off) | Out-Null
-    if ($data[$off] -ne 0x02) { return @() }; $off++; $ = Parse-Length $data ([ref]$off); $off += $  # version
-    if ($data[$off] -ne 0x04) { return @() }; $off++; $commLen = Parse-Length $data ([ref]$off); $off += $commLen
+    if ($data[$off] -ne 0x30) { return @() }; $off++; $null = ConvertFrom-BerLength $data ([ref]$off)
+    if ($data[$off] -ne 0x02) { return @() }; $off++; $len = ConvertFrom-BerLength $data ([ref]$off); $off += $len  # version
+    if ($data[$off] -ne 0x04) { return @() }; $off++; $commLen = ConvertFrom-BerLength $data ([ref]$off); $off += $commLen
     # PDU (A2/response) -> skip header to varbinds
-    $pduTag = $data[$off]; $off++
-    $ = Parse-Length $data ([ref]$off) | Out-Null
+    $off++
+    $null = ConvertFrom-BerLength $data ([ref]$off)
     # request-id, error-status, error-index
-    if ($data[$off] -eq 0x02){ $off++; $ = Parse-Length $data ([ref]$off); $off += $ }
-    if ($data[$off] -eq 0x02){ $off++; $ = Parse-Length $data ([ref]$off); $off += $ }
-    if ($data[$off] -eq 0x02){ $off++; $ = Parse-Length $data ([ref]$off); $off += $ }
+    if ($data[$off] -eq 0x02){ $off++; $len = ConvertFrom-BerLength $data ([ref]$off); $off += $len }
+    if ($data[$off] -eq 0x02){ $off++; $len = ConvertFrom-BerLength $data ([ref]$off); $off += $len }
+    if ($data[$off] -eq 0x02){ $off++; $len = ConvertFrom-BerLength $data ([ref]$off); $off += $len }
     # VarBindList
-    if ($data[$off] -ne 0x30) { return @() }; $off++; $vblLen = Parse-Length $data ([ref]$off)
+    if ($data[$off] -ne 0x30) { return @() }; $off++; $vblLen = ConvertFrom-BerLength $data ([ref]$off)
     $vblEnd = $off + $vblLen
     $out = @()
     while ($off -lt $vblEnd) {
-        if ($data[$off] -ne 0x30) { break }; $off++; $vbLen = Parse-Length $data ([ref]$off)
+        if ($data[$off] -ne 0x30) { break }; $off++; $vbLen = ConvertFrom-BerLength $data ([ref]$off)
         $vbEnd = $off + $vbLen
         # OID
-        if ($data[$off] -ne 0x06) { break }; $off++; $oidLen = Parse-Length $data ([ref]$off)
-        $oid = Parse-OID $data ([ref]$off) $oidLen
+        if ($data[$off] -ne 0x06) { break }; $off++; $oidLen = ConvertFrom-BerLength $data ([ref]$off)
+        $oid = ConvertFrom-BerOid $data ([ref]$off) $oidLen
         # Value
-        $type, $val = Parse-Value $data ([ref]$off)
+        $type, $val = ConvertFrom-BerValue $data ([ref]$off)
         $out += [pscustomobject]@{ OID = $oid; Type = $type; Value = $val }
         $off = $vbEnd
     }
@@ -309,10 +299,10 @@ function Parse-VarBinds([byte[]]$data) {
 # ---------------------------
 Write-Host "`nChecking SNMP UDP/161 (sysDescr.0)..." -ForegroundColor Yellow
 $sysDescrOID = "1.3.6.1.2.1.1.1.0"
-$resp = Send-SNMPRequest -TargetIp $ip -Community $community -PduTag 0xA0 -Oids @($sysDescrOID) -TimeoutMs 2000
+$resp = Invoke-SnmpRequest -TargetIp $ip -Community $community -PduTag 0xA0 -Oids @($sysDescrOID) -TimeoutMs 2000
 
 if ($null -ne $resp -and $resp.Length -gt 0) {
-    $vbs = Parse-VarBinds $resp
+    $vbs = ConvertFrom-SnmpVarBinds $resp
     $descr = ($vbs | Where-Object {$_.OID -eq $sysDescrOID} | Select-Object -First 1)
     if ($descr) {
         Write-Host "✅ SNMP response from $ip" -ForegroundColor Green
@@ -333,7 +323,7 @@ $maxBase  = "1.3.6.1.2.1.43.11.1.1.7"
 
 Write-Host "`nQuerying Printer-MIB supplies (best-effort walk)..." -ForegroundColor Yellow
 
-function Walk-BaseOID {
+function Get-SnmpWalkBaseOid {
     param(
         [string]$TargetIp,
         [string]$Community,
@@ -343,9 +333,9 @@ function Walk-BaseOID {
     $current = $BaseOID
     $results = @()
     for ($i=0; $i -lt $MaxSteps; $i++) {
-        $resp = Send-SNMPRequest -TargetIp $TargetIp -Community $Community -PduTag 0xA1 -Oids @($current) -TimeoutMs 2000  # GET-NEXT
+        $resp = Invoke-SnmpRequest -TargetIp $TargetIp -Community $Community -PduTag 0xA1 -Oids @($current) -TimeoutMs 2000  # GET-NEXT
         if ($null -eq $resp) { break }
-        $vbs = Parse-VarBinds $resp
+        $vbs = ConvertFrom-SnmpVarBinds $resp
         if ($vbs.Count -eq 0) { break }
         $vb = $vbs[0]
         if (-not $vb.OID.StartsWith($BaseOID + ".")) { break }
@@ -355,9 +345,9 @@ function Walk-BaseOID {
     return $results
 }
 
-$desc = Walk-BaseOID -TargetIp $ip -Community $community -BaseOID $descBase
-$level = Walk-BaseOID -TargetIp $ip -Community $community -BaseOID $levelBase
-$max   = Walk-BaseOID -TargetIp $ip -Community $community -BaseOID $maxBase
+$desc = Get-SnmpWalkBaseOid -TargetIp $ip -Community $community -BaseOID $descBase
+$level = Get-SnmpWalkBaseOid -TargetIp $ip -Community $community -BaseOID $levelBase
+$max   = Get-SnmpWalkBaseOid -TargetIp $ip -Community $community -BaseOID $maxBase
 
 if ($desc.Count -eq 0 -and $level.Count -eq 0 -and $max.Count -eq 0) {
     Write-Host "⚠️ No Printer-MIB supplies entries returned. Device may restrict these OIDs or require a different community." -ForegroundColor Yellow
@@ -389,11 +379,11 @@ if ($desc.Count -eq 0 -and $level.Count -eq 0 -and $max.Count -eq 0) {
             $pct = [math]::Round(($row.Level / $row.Max) * 100)
         }
         $descText = if ($row.Description) { [string]$row.Description } else { "(unknown)" }
-        $lvlText  = if ($row.Level -ne $null) { $row.Level } else { "-" }
-        $maxText  = if ($row.Max -ne $null) { $row.Max } else { "-" }
+        $lvlText  = if ($null -ne $row.Level) { $row.Level } else { "-" }
+        $maxText  = if ($null -ne $row.Max) { $row.Max } else { "-" }
         $line = "{0,-6}  {1,-30}  {2,8}  {3,8}" -f $k, ($descText.Substring(0,[math]::Min(30,$descText.Length))), $lvlText, $maxText
         Write-Host $line
-        if ($pct -ne $null) {
+        if ($null -ne $pct) {
             Write-Host ("         -> ~{0}% remaining" -f $pct)
         }
     }
