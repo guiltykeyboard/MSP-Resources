@@ -700,29 +700,34 @@ if ($null -ne $resp -and $resp.Length -gt 0) {
         Write-Host "[OK] SNMP responded (different OID). First VB: $($vbs[0].OID) -> $($vbs[0].Value)" -ForegroundColor Green
     }
 } else {
-    # Fallback: some Xerox agents happily reply to a GET-NEXT starting at 1.3 (root of iso.org)
-    # This mirrors iReasoning's successful flow seen in your capture.
-    $probeOid = "1.3"
-    $resp2 = Invoke-SnmpRequest -TargetIp $ip -Community $community -PduTag 0xA1 -Oids @($probeOid) -TimeoutMs 3000
-    if ($null -ne $resp2 -and $resp2.Length -gt 0) {
-        $vbs2 = ConvertFrom-SnmpVarBinds $resp2
-        if ($vbs2.Count -gt 0) {
-            $first = $vbs2[0]
-            # If the device returns sysDescr.0 (1.3.6.1.2.1.1.1.0) or another sys* OID, accept as success
-            if ($first.OID -eq $sysDescrOID -or $first.OID -like "1.3.6.1.2.1.1.*") {
-                $snmpOk = $true
-                Write-Host "[OK] SNMP responded via GET-NEXT probe (starting at 1.3)." -ForegroundColor Green
-                if ($first.OID -eq $sysDescrOID -and $first.Value) {
-                    Write-Host ("sysDescr.0: " + $first.Value)
+    # Fallback probes (explicit so you can see them in the output)
+    $probeChain = @("1.3","1.3.6","1.3.6.1.2.1")
+    foreach ($p in $probeChain) {
+        Write-Host ("[INFO] Trying SNMP GET-NEXT fallback starting at OID {0} ..." -f $p) -ForegroundColor DarkGray
+        $resp2 = Invoke-SnmpRequest -TargetIp $ip -Community $community -PduTag 0xA1 -Oids @($p) -TimeoutMs 4000
+        if ($null -ne $resp2 -and $resp2.Length -gt 0) {
+            $vbs2 = ConvertFrom-SnmpVarBinds $resp2
+            if ($vbs2.Count -gt 0) {
+                $first = $vbs2[0]
+                if ($first.OID -eq $sysDescrOID -or $first.OID -like "1.3.6.1.2.1.1.*") {
+                    $snmpOk = $true
+                    Write-Host ("[OK] SNMP responded via GET-NEXT probe (start={0})." -f $p) -ForegroundColor Green
+                    if ($first.OID -eq $sysDescrOID -and $first.Value) {
+                        Write-Host ("sysDescr.0: " + $first.Value)
+                    } else {
+                        Write-Host ("First VB: {0} -> {1}" -f $first.OID, $first.Value)
+                    }
+                    break
                 } else {
-                    Write-Host ("First VB: {0} -> {1}" -f $first.OID, $first.Value)
+                    Write-Host ("[INFO] SNMP responded to GET-NEXT (start={0}) with {1}, continuing..." -f $p, $first.OID) -ForegroundColor DarkGray
                 }
             }
+        } else {
+            Write-Host ("[INFO] No response to GET-NEXT (start={0}); trying next probe..." -f $p) -ForegroundColor DarkGray
         }
     }
     if ($snmpOk) {
-        # Skip the rest of the failure diagnostics since fallback succeeded
-        return
+        # A fallback succeeded; continue script normally (no early return)
     }
     $sameSubnet = $false
     if ($local -and $local.IPAddress -and $local.PrefixLength) {
