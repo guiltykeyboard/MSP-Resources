@@ -374,8 +374,15 @@ function Invoke-SnmpRequest {
     try {
         if ($script:local -and $script:local.IPAddress) { $bindIp = $script:local.IPAddress }
     } catch {}
+    $srcPort = 0
+    try {
+        if ($env:SNMP_SRC_PORT) {
+            $p = [int]$env:SNMP_SRC_PORT
+            if ($p -ge 1024 -and $p -le 65535) { $srcPort = $p }
+        }
+    } catch {}
     if ($bindIp) {
-        $localEp = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Parse($bindIp), 0)
+        $localEp = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Parse($bindIp), $srcPort)
         $udp = [System.Net.Sockets.UdpClient]::new($localEp)
     } else {
         $udp = [System.Net.Sockets.UdpClient]::new([System.Net.Sockets.AddressFamily]::InterNetwork)
@@ -384,6 +391,10 @@ function Invoke-SnmpRequest {
     $udp.Client.SendBufferSize = 4096
     $udp.Client.ReceiveBufferSize = 4096
     $udp.Connect($TargetIp, 161)
+    if ($env:SNMP_DEBUG -eq '1') {
+        $lep = $udp.Client.LocalEndPoint.ToString()
+        Write-Host "[DBG] Local UDP endpoint: $lep" -ForegroundColor DarkGray
+    }
 
     # Build packet (strict simple encoder for Xerox)
     $reqId = Get-Random -Minimum 1 -Maximum 32767
@@ -671,7 +682,7 @@ if ($null -ne $resp -and $resp.Length -gt 0) {
     }
     if ($snmpOk) {
         # Skip the rest of the failure diagnostics since fallback succeeded
-        goto AfterSnmpFailureDiagnostics
+        return
     }
     $sameSubnet = $false
     if ($local -and $local.IPAddress -and $local.PrefixLength) {
@@ -686,34 +697,35 @@ if ($null -ne $resp -and $resp.Length -gt 0) {
         Write-Host ("Action: Check whether SNMP is disabled on the printer via https://{0} . If SNMP is enabled, contact the network administrator to verify SNMP communication on the layer-2 network between {1} and {0}." -f $ip, $local.IPAddress)
     }
     # Inspect Windows Firewall for potential blocks
-    :AfterSnmpFailureDiagnostics
-    try {
-        $fwBlocks = Get-PossibleFirewallBlocksForSnmp -TargetIp $ip
-        if ($fwBlocks -and $fwBlocks.Count -gt 0) {
-            Write-Host "`n[FIREWALL] Windows Firewall appears to have rule(s) that may block SNMP (UDP/161) to this target:" -ForegroundColor Red
-            $fwBlocks | ForEach-Object {
-                Write-Host (" - {0} [{1}]  Proto={2}  LPort={3}  RPort={4}  RAddr={5}" -f $_.DisplayName, $_.Direction, $_.Protocol, $_.LocalPort, $_.RemotePort, ($_.RemoteAddr -join ',')) -ForegroundColor Red
+    if (-not $snmpOk) {
+        try {
+            $fwBlocks = Get-PossibleFirewallBlocksForSnmp -TargetIp $ip
+            if ($fwBlocks -and $fwBlocks.Count -gt 0) {
+                Write-Host "`n[FIREWALL] Windows Firewall appears to have rule(s) that may block SNMP (UDP/161) to this target:" -ForegroundColor Red
+                $fwBlocks | ForEach-Object {
+                    Write-Host (" - {0} [{1}]  Proto={2}  LPort={3}  RPort={4}  RAddr={5}" -f $_.DisplayName, $_.Direction, $_.Protocol, $_.LocalPort, $_.RemotePort, ($_.RemoteAddr -join ',')) -ForegroundColor Red
+                }
+                Write-Host "[NOTE] This script does not modify firewall settings; list above is for triage only." -ForegroundColor Red
+            } else {
+                Write-Host "[OK] Windows Firewall does not appear to be blocking UDP/161 to this target." -ForegroundColor Green
             }
-            Write-Host "[NOTE] This script does not modify firewall settings; list above is for triage only." -ForegroundColor Red
-        } else {
-            Write-Host "[OK] Windows Firewall does not appear to be blocking UDP/161 to this target." -ForegroundColor Green
+        } catch {
+            Write-Host "[INFO] Skipped firewall inspection (insufficient privileges or cmdlets unavailable)." -ForegroundColor DarkGray
         }
-    } catch {
-        Write-Host "[INFO] Skipped firewall inspection (insufficient privileges or cmdlets unavailable)." -ForegroundColor DarkGray
+        # Additional hint for common Xerox access control: if local and target differ in /24 but are within a /23,
+        # some devices may have IP Filtering that only allows the 10.x.y.0/24 half containing the printer.
+        try {
+            if ($sameSubnet -and $local -and $local.IPAddress -and $ip) {
+                $local24 = ($local.IPAddress -split '\.')[0..2] -join '.'
+                $target24 = ($ip -split '\.')[0..2] -join '.'
+                if ($local24 -ne $target24) {
+                    Write-Host "[HINT] This PC is 10.x.${($local.IPAddress -split '\.')[2]}.x and the printer is ${target24}.x." -ForegroundColor Yellow
+                    Write-Host "       If the printer has IP Filtering/Access Control allowing only its own /24 (e.g., ${target24}.0/24), SNMP from ${local24}.0/24 will be dropped." -ForegroundColor Yellow
+                    Write-Host "       Check Properties -> Security/Connectivity -> IP Filtering (IPv4) / Access Control on the Xerox and allow this PC/subnet or disable the filter." -ForegroundColor Yellow
+                }
+            }
+        } catch {}
     }
-    # Additional hint for common Xerox access control: if local and target differ in /24 but are within a /23,
-    # some devices may have IP Filtering that only allows the 10.x.y.0/24 half containing the printer.
-    try {
-        if ($sameSubnet -and $local -and $local.IPAddress -and $ip) {
-            $local24 = ($local.IPAddress -split '\.')[0..2] -join '.'
-            $target24 = ($ip -split '\.')[0..2] -join '.'
-            if ($local24 -ne $target24) {
-                Write-Host "[HINT] This PC is 10.x.${($local.IPAddress -split '\.')[2]}.x and the printer is ${target24}.x." -ForegroundColor Yellow
-                Write-Host "       If the printer has IP Filtering/Access Control allowing only its own /24 (e.g., ${target24}.0/24), SNMP from ${local24}.0/24 will be dropped." -ForegroundColor Yellow
-                Write-Host "       Check Properties → Security/Connectivity → IP Filtering (IPv4) / Access Control on the Xerox and allow this PC/subnet or disable the filter." -ForegroundColor Yellow
-            }
-        }
-    } catch {}
     $snmpOk = $false
 }
 
@@ -738,7 +750,7 @@ function Get-SnmpFirstUnder {
 
 if (-not $snmpOk) {
     Write-Host "`n[INFO] Skipping additional SNMP queries (sysName/serial/page count) because the initial SNMP test failed." -ForegroundColor DarkGray
-    goto AfterSnmpQueries
+    # (skipping further SNMP queries due to failure)
 }
 # ---------------------------
 # Quick Device Info (name / serial / page count)
@@ -842,7 +854,7 @@ function Get-SnmpWalkBaseOid {
     }
 }
 
-:#AfterSnmpQueries
+# ---------------------------
 # ---------------------------
 # Summary for ticket notes (single line, easy to paste)
 # ---------------------------
@@ -850,7 +862,7 @@ try {
     $httpsStatus = if ($tcp -and $tcp.TcpTestSucceeded) { 'PASS' } else { 'FAIL' }
 } catch { $httpsStatus = 'UNKNOWN' }
 try {
-    $snmpStatus = if ($resp -and ($resp.Length -gt 0)) { 'PASS' } else { 'FAIL' }
+    $snmpStatus = if ($snmpOk) { 'PASS' } else { 'FAIL' }
 } catch { $snmpStatus = 'UNKNOWN' }
 try {
     $subnetRel = if ($local -and $local.IPAddress -and $local.PrefixLength -and $ip) {
