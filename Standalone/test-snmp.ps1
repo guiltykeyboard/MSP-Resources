@@ -264,6 +264,15 @@ function New-SnmpV2cGetPacketSimple {
         $content = $body.ToArray()
         return ,0x06 + ,([byte]$content.Length) + $content
     }
+    # Helper to encode positive INTEGER in fixed 4-byte big-endian form
+    function _EncIntPosFixed4([int]$v) {
+        if ($v -lt 0) { throw "RequestId must be non-negative" }
+        $b0 = [byte](($v -shr 24) -band 0xFF)
+        $b1 = [byte](($v -shr 16) -band 0xFF)
+        $b2 = [byte](($v -shr 8)  -band 0xFF)
+        $b3 = [byte]($v -band 0xFF)
+        return ,0x02 + ,0x04 + ,$b0 + ,$b1 + ,$b2 + ,$b3
+    }
     # INTEGER encoder (positive only for our fields)
     function _EncInt([int]$v) {
         if ($v -lt 0) { throw "RequestId must be non-negative" }
@@ -279,7 +288,7 @@ function New-SnmpV2cGetPacketSimple {
     $vb = (_EncodeOid $Oid) + ,0x05 + ,0x00
     $vbl = ,0x30 + ,([byte]$vb.Length) + $vb
     # PDU: GetRequest (0xA0) :: request-id, error-status=0, error-index=0, varbindlist
-    $pduCore = (_EncInt $RequestId) + (_EncInt 0) + (_EncInt 0) + $vbl
+    $pduCore = (_EncIntPosFixed4 $RequestId) + (_EncInt 0) + (_EncInt 0) + $vbl
     $pdu     = ,0xA0 + ,([byte]$pduCore.Length) + $pduCore
     # Message: SEQUENCE(version, community, pdu)
     $msgCore = $ver + $comm + $pdu
@@ -318,6 +327,15 @@ function New-SnmpV2cGetNextPacketSimple {
         $content = $body.ToArray()
         return ,0x06 + ,([byte]$content.Length) + $content
     }
+    # Helper to encode positive INTEGER in fixed 4-byte big-endian form
+    function _EncIntPosFixed4([int]$v) {
+        if ($v -lt 0) { throw "RequestId must be non-negative" }
+        $b0 = [byte](($v -shr 24) -band 0xFF)
+        $b1 = [byte](($v -shr 16) -band 0xFF)
+        $b2 = [byte](($v -shr 8)  -band 0xFF)
+        $b3 = [byte]($v -band 0xFF)
+        return ,0x02 + ,0x04 + ,$b0 + ,$b1 + ,$b2 + ,$b3
+    }
     # INTEGER encoder (positive)
     function _EncInt([int]$v) {
         if ($v -lt 0) { throw "RequestId must be non-negative" }
@@ -333,7 +351,7 @@ function New-SnmpV2cGetNextPacketSimple {
     $vb = (_EncodeOid $Oid) + ,0x05 + ,0x00
     $vbl = ,0x30 + ,([byte]$vb.Length) + $vb
     # PDU: GetNextRequest (0xA1)
-    $pduCore = (_EncInt $RequestId) + (_EncInt 0) + (_EncInt 0) + $vbl
+    $pduCore = (_EncIntPosFixed4 $RequestId) + (_EncInt 0) + (_EncInt 0) + $vbl
     $pdu     = ,0xA1 + ,([byte]$pduCore.Length) + $pduCore
     # Message: SEQUENCE(version, community, pdu)
     $msgCore = $ver + $comm + $pdu
@@ -565,7 +583,7 @@ function Get-PossibleFirewallBlocksForSnmp {
 
     # Outbound BLOCK rules that could block UDP/161 to target
     try {
-        $outBlock = Get-NetFirewallRule -Enabled True -Direction Outbound -Action Block
+        $outBlock = Get-NetFirewallRule -Enabled True -Direction Outbound -Action Block -ErrorAction SilentlyContinue
         foreach ($r in $outBlock) {
             $pf = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r
             $af = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r
@@ -587,7 +605,7 @@ function Get-PossibleFirewallBlocksForSnmp {
 
     # Inbound BLOCK rules that could block UDP responses from remote port 161
     try {
-        $inBlock = Get-NetFirewallRule -Enabled True -Direction Inbound -Action Block
+        $inBlock = Get-NetFirewallRule -Enabled True -Direction Inbound -Action Block -ErrorAction SilentlyContinue
         foreach ($r in $inBlock) {
             $pf = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r
             $af = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r
