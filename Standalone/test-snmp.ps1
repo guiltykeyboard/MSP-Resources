@@ -15,7 +15,9 @@ The supplies walk is best-effort and stops when it leaves the base OID or reache
 .NOTES
 - Requires no external modules; builds minimal SNMPv2c PDUs via .NET byte arrays.
 - UDP/162 (traps) is not queried (it’s for unsolicited messages).
+
 #>
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 
 # ---------------------------
@@ -31,37 +33,84 @@ if ([string]::IsNullOrWhiteSpace($ip)) {
 $community = Read-Host "Enter SNMP community string (default = public)"
 if ([string]::IsNullOrWhiteSpace($community)) { $community = "public" }
 
+
 # ---------------------------
 # Local endpoint (CIDR) used to reach target
 # ---------------------------
-function Get-LocalIPv4CIDRForDestination {
+function Get-LocalIPv4Context {
     param([string]$DestinationIp)
+    # Helpers
+    function Convert-IPStringToBytes([string]$ip) {
+        return ([System.Net.IPAddress]::Parse($ip)).GetAddressBytes()
+    }
+    function Convert-BytesToIPString([byte[]]$bytes) {
+        return ([System.Net.IPAddress]::new($bytes)).ToString()
+    }
+    function Get-NetworkAddress([string]$ip,[int]$prefix) {
+        $bytes = Convert-IPStringToBytes $ip
+        $mask = [byte[]](0,0,0,0)
+        for ($i=0; $i -lt 4; $i++) {
+            $bits = [Math]::Max([Math]::Min($prefix - ($i*8), 8), 0)
+            $mask[$i] = [byte](0xFF -shl (8 - $bits) -band 0xFF)
+        }
+        $net = [byte[]](0,0,0,0)
+        for ($i=0; $i -lt 4; $i++) { $net[$i] = [byte]($bytes[$i] -band $mask[$i]) }
+        return Convert-BytesToIPString $net
+    }
+    function Get-NetworkCIDR([string]$ip,[int]$prefix) {
+        return ("{0}/{1}" -f (Get-NetworkAddress $ip $prefix), $prefix)
+    }
+
     try {
         $route = Get-NetRoute -DestinationPrefix "$DestinationIp/32" -AddressFamily IPv4 -ErrorAction Stop |
                  Sort-Object RouteMetric, PrefSource -Descending:$false | Select-Object -First 1
         if ($null -ne $route) {
-            $ip = Get-NetIPAddress -InterfaceIndex $route.InterfaceIndex -AddressFamily IPv4 |
-                  Where-Object { $null -ne $_.IPAddress -and $_.SkipAsSource -ne $true } |
-                  Sort-Object -Property PrefixLength -Descending:$true | Select-Object -First 1
-            if ($ip) { return "{0}/{1}" -f $ip.IPAddress, $ip.PrefixLength }
+            $addr = Get-NetIPAddress -InterfaceIndex $route.InterfaceIndex -AddressFamily IPv4 |
+                    Where-Object { $null -ne $_.IPAddress -and $_.SkipAsSource -ne $true } |
+                    Sort-Object -Property PrefixLength -Descending:$true | Select-Object -First 1
+            if ($addr) {
+                $cidr = "{0}/{1}" -f $addr.IPAddress, $addr.PrefixLength
+                $netCidr = Get-NetworkCIDR $addr.IPAddress $addr.PrefixLength
+                $ifAlias = (Get-NetIPInterface -InterfaceIndex $route.InterfaceIndex -AddressFamily IPv4).InterfaceAlias
+                return [pscustomobject]@{
+                    IPAddress    = $addr.IPAddress
+                    PrefixLength = $addr.PrefixLength
+                    CIDR         = $cidr
+                    NetworkCIDR  = $netCidr
+                    Gateway      = $route.NextHop
+                    InterfaceAlias = $ifAlias
+                }
+            }
         }
     } catch { }
-    # Fallback: pick primary interface with default gateway
-    $primary = Get-NetIPConfiguration | Where-Object { $null -ne $_.IPv4DefaultGateway } |
-               Select-Object -First 1
+    # Fallback: primary interface with default gateway
+    $primary = Get-NetIPConfiguration | Where-Object { $null -ne $_.IPv4DefaultGateway } | Select-Object -First 1
     if ($primary -and $primary.IPv4Address -and $primary.IPv4Address.IPAddress) {
-        $addr = $primary.IPv4Address.IPAddress
+        $ipAddr = $primary.IPv4Address.IPAddress
         $pl = ($primary.IPv4Address | Select-Object -First 1).PrefixLength
-        return "{0}/{1}" -f $addr, $pl
+        return [pscustomobject]@{
+            IPAddress    = $ipAddr
+            PrefixLength = $pl
+            CIDR         = ("{0}/{1}" -f $ipAddr, $pl)
+            NetworkCIDR  = (Get-NetworkCIDR $ipAddr $pl)
+            Gateway      = $primary.IPv4DefaultGateway.NextHop
+            InterfaceAlias = $primary.InterfaceAlias
+        }
     }
-    # Last resort: any IPv4 address
-    $any = Get-NetIPAddress -AddressFamily IPv4 | Select-Object -First 1
-    if ($any) { return "{0}/{1}" -f $any.IPAddress, $any.PrefixLength }
-    return "(unknown)"
+    return [pscustomobject]@{
+        IPAddress    = $null
+        PrefixLength = $null
+        CIDR         = "(unknown)"
+        NetworkCIDR  = "(unknown)"
+        Gateway      = "(unknown)"
+        InterfaceAlias = "(unknown)"
+    }
 }
 
-$localCIDR = Get-LocalIPv4CIDRForDestination -DestinationIp $ip
-Write-Host ("Local endpoint for this test: {0}" -f $localCIDR) -ForegroundColor DarkCyan
+$local = Get-LocalIPv4Context -DestinationIp $ip
+Write-Host ("Local endpoint for this test: {0}" -f $local.CIDR) -ForegroundColor DarkCyan
+Write-Host ("Local network: {0}" -f $local.NetworkCIDR) -ForegroundColor DarkCyan
+Write-Host ("Gateway: {0} (Interface: {1})" -f $local.Gateway, $local.InterfaceAlias) -ForegroundColor DarkCyan
 
 # ---------------------------
 # TCP 443 Reachability Test
@@ -70,9 +119,9 @@ Write-Host "`n=== Connectivity test to $ip ===" -ForegroundColor Cyan
 Write-Host "Checking TCP port 443 (HTTPS)..." -ForegroundColor Yellow
 $tcp = Test-NetConnection -ComputerName $ip -Port 443 -WarningAction SilentlyContinue
 if ($tcp.TcpTestSucceeded) {
-    Write-Host "✅ TCP 443 reachable on $ip" -ForegroundColor Green
+    Write-Host "[OK] TCP 443 reachable on $ip" -ForegroundColor Green
 } else {
-    Write-Host "❌ TCP 443 NOT reachable on $ip" -ForegroundColor Red
+    Write-Host "[FAIL] TCP 443 NOT reachable on $ip" -ForegroundColor Red
 }
 
 # ---------------------------
@@ -302,6 +351,119 @@ function ConvertFrom-SnmpVarBinds([byte[]]$data) {
 }
 
 # ---------------------------
+# Helper: Test-IsSameSubnet
+# ---------------------------
+function Test-IsSameSubnet {
+    param(
+        [string]$LocalIp,
+        [int]$LocalPrefix,
+        [string]$TargetIp
+    )
+    function ToBytes([string]$x){ ([System.Net.IPAddress]::Parse($x)).GetAddressBytes() }
+    $lip = ToBytes $LocalIp
+    $tip = ToBytes $TargetIp
+    $mask = [byte[]](0,0,0,0)
+    for ($i=0; $i -lt 4; $i++) {
+        $bits = [Math]::Max([Math]::Min($LocalPrefix - ($i*8), 8), 0)
+        $mask[$i] = [byte](0xFF -shl (8 - $bits) -band 0xFF)
+    }
+    for ($i=0; $i -lt 4; $i++) {
+        if ( ($lip[$i] -band $mask[$i]) -ne ($tip[$i] -band $mask[$i]) ) { return $false }
+    }
+    return $true
+}
+
+ # ---------------------------
+# Helper: Identify possible Windows Firewall blocks for SNMP
+# ---------------------------
+function Get-PossibleFirewallBlocksForSnmp {
+    param(
+        [string]$TargetIp
+    )
+    $results = @()
+
+
+    function RuleMatchesTarget {
+        param($rule,$pf,$af,[string]$dir)
+        # Protocol match (UDP or Any)
+        $protoOk = ($pf.Protocol -eq 'UDP' -or $pf.Protocol -eq 'Any' -or $pf.Protocol -eq 17 -or $pf.Protocol -eq 256)
+        if (-not $protoOk) { return $false }
+
+        # Ports
+        $remotePort = [string]$pf.RemotePort
+        $localPort  = [string]$pf.LocalPort
+        $remotePortAny = [string]::IsNullOrEmpty($remotePort) -or $remotePort -eq 'Any' -or $remotePort -eq '*'
+        $localPortAny  = [string]::IsNullOrEmpty($localPort)  -or $localPort  -eq 'Any' -or $localPort  -eq '*'
+
+        $portOk = $false
+        if ($dir -eq 'Outbound') {
+            $portOk = ($remotePortAny -or ($remotePort -match '(^|,|\s)161($|,|\s)'))
+        } else {
+            # inbound response will be FROM remote port 161 TO local ephemeral port.
+            $portOk = ($remotePortAny -or ($remotePort -match '(^|,|\s)161($|,|\s)') -or $localPortAny)
+        }
+        if (-not $portOk) { return $false }
+
+        # Address filter
+        $remoteAddr = $af.RemoteAddress
+        $addrOk = $false
+        if (-not $remoteAddr -or $remoteAddr -eq 'Any' -or $remoteAddr -eq '*') { $addrOk = $true }
+        else {
+            # RemoteAddress can be a list; do simple contains/equals
+            if ($remoteAddr -is [array]) { $addrOk = $remoteAddr -contains $TargetIp }
+            else { $addrOk = ($remoteAddr -eq $TargetIp) }
+        }
+        return $addrOk
+    }
+
+    # Outbound BLOCK rules that could block UDP/161 to target
+    try {
+        $outBlock = Get-NetFirewallRule -Enabled True -Direction Outbound -Action Block
+        foreach ($r in $outBlock) {
+            $pf = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r
+            $af = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r
+            if ($pf -and (RuleMatchesTarget -rule $r -pf $pf -af $af -dir 'Outbound')) {
+                $results += [pscustomobject]@{
+                    Direction   = 'Outbound'
+                    Name        = $r.Name
+                    DisplayName = $r.DisplayName
+                    Profile     = $r.Profile
+                    Protocol    = $pf.Protocol
+                    LocalPort   = $pf.LocalPort
+                    RemotePort  = $pf.RemotePort
+                    RemoteAddr  = $af.RemoteAddress
+                    Action      = $r.Action
+                }
+            }
+        }
+    } catch {}
+
+    # Inbound BLOCK rules that could block UDP responses from remote port 161
+    try {
+        $inBlock = Get-NetFirewallRule -Enabled True -Direction Inbound -Action Block
+        foreach ($r in $inBlock) {
+            $pf = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r
+            $af = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r
+            if ($pf -and (RuleMatchesTarget -rule $r -pf $pf -af $af -dir 'Inbound')) {
+                $results += [pscustomobject]@{
+                    Direction   = 'Inbound'
+                    Name        = $r.Name
+                    DisplayName = $r.DisplayName
+                    Profile     = $r.Profile
+                    Protocol    = $pf.Protocol
+                    LocalPort   = $pf.LocalPort
+                    RemotePort  = $pf.RemotePort
+                    RemoteAddr  = $af.RemoteAddress
+                    Action      = $r.Action
+                }
+            }
+        }
+    } catch {}
+
+    return $results
+}
+
+# ---------------------------
 # SNMP sysDescr.0
 # ---------------------------
 Write-Host "`nChecking SNMP UDP/161 (sysDescr.0)..." -ForegroundColor Yellow
@@ -312,18 +474,88 @@ if ($null -ne $resp -and $resp.Length -gt 0) {
     $vbs = ConvertFrom-SnmpVarBinds $resp
     $descr = ($vbs | Where-Object {$_.OID -eq $sysDescrOID} | Select-Object -First 1)
     if ($descr) {
-        Write-Host "✅ SNMP response from $ip" -ForegroundColor Green
+        Write-Host "[OK] SNMP response from $ip" -ForegroundColor Green
         Write-Host ("sysDescr.0: " + $descr.Value)
     } else {
-        Write-Host "⚠️ SNMP responded, but sysDescr.0 not parsed (device-specific encoding?)." -ForegroundColor Yellow
+        Write-Host "[WARN] SNMP responded, but sysDescr.0 not parsed (device-specific encoding?)." -ForegroundColor Yellow
     }
 } else {
-    Write-Host "❌ No SNMP response from $ip (UDP/161). Check ACLs, community, or SNMP service." -ForegroundColor Red
+    $sameSubnet = $false
+    if ($local -and $local.IPAddress -and $local.PrefixLength) {
+        $sameSubnet = Test-IsSameSubnet -LocalIp $local.IPAddress -LocalPrefix $local.PrefixLength -TargetIp $ip
+    }
+    if (-not $sameSubnet) {
+        Write-Host "[FAIL] Unable to communicate with printer using SNMP on UDP/161." -ForegroundColor Red
+        Write-Host ("Reason hint: target {0} is on a DIFFERENT subnet than this computer." -f $ip)
+        Write-Host ("Action: Printer technician should contact the network administrator to verify that SNMP (UDP/161) from monitoring computer {0} to target printer {1}/32 is allowed across the network boundary and is not blocked by a firewall rule/ACL." -f $local.CIDR, "$ip")
+    } else {
+        Write-Host "[FAIL] Target printer is on the SAME subnet, but SNMP (UDP/161) did not respond." -ForegroundColor Red
+        Write-Host ("Action: Check whether SNMP is disabled on the printer via https://{0} . If SNMP is enabled, contact the network administrator to verify SNMP communication on the layer-2 network between {1} and {0}." -f $ip, $local.IPAddress)
+    }
+    # Inspect Windows Firewall for potential blocks
+    try {
+        $fwBlocks = Get-PossibleFirewallBlocksForSnmp -TargetIp $ip
+        if ($fwBlocks -and $fwBlocks.Count -gt 0) {
+            Write-Host "`n[FIREWALL] Windows Firewall appears to have rule(s) that may block SNMP (UDP/161) to this target:" -ForegroundColor Red
+            $fwBlocks | ForEach-Object {
+                Write-Host (" - {0} [{1}]  Proto={2}  LPort={3}  RPort={4}  RAddr={5}" -f $_.DisplayName, $_.Direction, $_.Protocol, $_.LocalPort, $_.RemotePort, ($_.RemoteAddr -join ',')) -ForegroundColor Red
+            }
+            Write-Host "[NOTE] This script does not modify firewall settings; list above is for triage only." -ForegroundColor Red
+        } else {
+            Write-Host "[OK] Windows Firewall does not appear to be blocking UDP/161 to this target." -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "[INFO] Skipped firewall inspection (insufficient privileges or cmdlets unavailable)." -ForegroundColor DarkGray
+    }
 }
 
 # ---------------------------
-# Printer Supplies Walk (best-effort)
+# Quick helpers to read first value under a base OID (GET-NEXT)
 # ---------------------------
+function Get-SnmpFirstUnder {
+    param(
+        [string]$TargetIp,
+        [string]$Community,
+        [string]$BaseOid,
+        [int]$TimeoutMs = 2000
+    )
+    $resp = Invoke-SnmpRequest -TargetIp $TargetIp -Community $Community -PduTag 0xA1 -Oids @($BaseOid) -TimeoutMs $TimeoutMs  # GET-NEXT
+    if ($null -eq $resp) { return $null }
+    $vbs = ConvertFrom-SnmpVarBinds $resp
+    if ($vbs.Count -eq 0) { return $null }
+    $vb = $vbs[0]
+    if ($vb.OID -and $vb.OID.StartsWith($BaseOid + ".")) { return $vb }
+    return $null
+}
+
+# ---------------------------
+# Quick Device Info (name / serial / page count)
+# ---------------------------
+Write-Host "`nQuick device info (best-effort)..." -ForegroundColor Yellow
+
+# sysName.0 (1.3.6.1.2.1.1.5.0) – standard SNMPv2-MIB
+$sysNameOID = "1.3.6.1.2.1.1.5.0"
+$sysNameResp = Invoke-SnmpRequest -TargetIp $ip -Community $community -PduTag 0xA0 -Oids @($sysNameOID) -TimeoutMs 1500
+if ($sysNameResp) {
+    $nvb = ConvertFrom-SnmpVarBinds $sysNameResp | Where-Object {$_.OID -eq $sysNameOID} | Select-Object -First 1
+    if ($nvb -and $nvb.Value) {
+        Write-Host (" - sysName.0: {0}" -f $nvb.Value)
+    }
+}
+
+# prtGeneralSerialNumber (1.3.6.1.2.1.43.5.1.1.17.*) – table; grab first row via GET-NEXT on the column base
+$serialBase = "1.3.6.1.2.1.43.5.1.1.17"
+$serialVb = Get-SnmpFirstUnder -TargetIp $ip -Community $community -BaseOid $serialBase -TimeoutMs 1500
+if ($serialVb -and $serialVb.Value) {
+    Write-Host (" - SerialNumber: {0}  (OID {1})" -f $serialVb.Value, $serialVb.OID)
+}
+
+# prtMarkerLifeCount (1.3.6.1.2.1.43.10.2.1.4.*) – total page count style counter; first row via GET-NEXT
+$pageCountBase = "1.3.6.1.2.1.43.10.2.1.4"
+$pageVb = Get-SnmpFirstUnder -TargetIp $ip -Community $community -BaseOid $pageCountBase -TimeoutMs 1500
+if ($pageVb -and $null -ne $pageVb.Value) {
+    Write-Host (" - TotalPageCounter (prtMarkerLifeCount): {0}  (OID {1})" -f $pageVb.Value, $pageVb.OID)
+}
 $descBase = "1.3.6.1.2.1.43.11.1.1.9"
 $levelBase = "1.3.6.1.2.1.43.11.1.1.8"
 $maxBase  = "1.3.6.1.2.1.43.11.1.1.7"
@@ -357,7 +589,7 @@ $level = Get-SnmpWalkBaseOid -TargetIp $ip -Community $community -BaseOID $level
 $max   = Get-SnmpWalkBaseOid -TargetIp $ip -Community $community -BaseOID $maxBase
 
 if ($desc.Count -eq 0 -and $level.Count -eq 0 -and $max.Count -eq 0) {
-    Write-Host "⚠️ No Printer-MIB supplies entries returned. Device may restrict these OIDs or require a different community." -ForegroundColor Yellow
+    Write-Host "[WARN] No Printer-MIB supplies entries returned. Device may restrict these OIDs or require a different community." -ForegroundColor Yellow
 } else {
     # Join by trailing index
     $byIndex = @{}
@@ -395,5 +627,24 @@ if ($desc.Count -eq 0 -and $level.Count -eq 0 -and $max.Count -eq 0) {
         }
     }
 }
+
+# ---------------------------
+# Summary for ticket notes (single line, easy to paste)
+# ---------------------------
+try {
+    $httpsStatus = if ($tcp -and $tcp.TcpTestSucceeded) { 'PASS' } else { 'FAIL' }
+} catch { $httpsStatus = 'UNKNOWN' }
+try {
+    $snmpStatus = if ($resp -and ($resp.Length -gt 0)) { 'PASS' } else { 'FAIL' }
+} catch { $snmpStatus = 'UNKNOWN' }
+try {
+    $subnetRel = if ($local -and $local.IPAddress -and $local.PrefixLength -and $ip) {
+        if (Test-IsSameSubnet -LocalIp $local.IPAddress -LocalPrefix $local.PrefixLength -TargetIp $ip) { 'same-subnet' } else { 'diff-subnet' }
+    } else { 'subnet-unknown' }
+} catch { $subnetRel = 'subnet-unknown' }
+
+$pathInfo = if ($local) { "{0} via {1} ({2})" -f $local.CIDR, $local.Gateway, $local.InterfaceAlias } else { "(path unknown)" }
+$summary = "SUMMARY: Target=$ip | HTTPS(443)=$httpsStatus | SNMP(161)=$snmpStatus | Scope=$subnetRel | From=$pathInfo"
+Write-Host "`n$summary"
 
 Write-Host "`n=== Test complete ===" -ForegroundColor Cyan
