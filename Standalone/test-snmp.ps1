@@ -631,6 +631,7 @@ function Get-PossibleFirewallBlocksForSnmp {
 # ---------------------------
 # SNMP sysDescr.0
 # ---------------------------
+$snmpOk = $false
 Write-Host "`nChecking SNMP UDP/161 (sysDescr.0)..." -ForegroundColor Yellow
 $sysDescrOID = "1.3.6.1.2.1.1.1.0"
 $resp = Invoke-SnmpRequest -TargetIp $ip -Community $community -PduTag 0xA0 -Oids @($sysDescrOID) -TimeoutMs 2000
@@ -639,12 +640,39 @@ if ($null -ne $resp -and $resp.Length -gt 0) {
     $vbs = ConvertFrom-SnmpVarBinds $resp
     $descr = ($vbs | Where-Object {$_.OID -eq $sysDescrOID} | Select-Object -First 1)
     if ($descr) {
+        $snmpOk = $true
         Write-Host "[OK] SNMP response from $ip" -ForegroundColor Green
         Write-Host ("sysDescr.0: " + $descr.Value)
     } else {
-        Write-Host "[WARN] SNMP responded, but sysDescr.0 not parsed (device-specific encoding?)." -ForegroundColor Yellow
+        # If device answered but with a different first OID, still consider SNMP reachable.
+        $snmpOk = $true
+        Write-Host "[OK] SNMP responded (different OID). First VB: $($vbs[0].OID) -> $($vbs[0].Value)" -ForegroundColor Green
     }
 } else {
+    # Fallback: some Xerox agents happily reply to a GET-NEXT starting at 1.3 (root of iso.org)
+    # This mirrors iReasoning's successful flow seen in your capture.
+    $probeOid = "1.3"
+    $resp2 = Invoke-SnmpRequest -TargetIp $ip -Community $community -PduTag 0xA1 -Oids @($probeOid) -TimeoutMs 3000
+    if ($null -ne $resp2 -and $resp2.Length -gt 0) {
+        $vbs2 = ConvertFrom-SnmpVarBinds $resp2
+        if ($vbs2.Count -gt 0) {
+            $first = $vbs2[0]
+            # If the device returns sysDescr.0 (1.3.6.1.2.1.1.1.0) or another sys* OID, accept as success
+            if ($first.OID -eq $sysDescrOID -or $first.OID -like "1.3.6.1.2.1.1.*") {
+                $snmpOk = $true
+                Write-Host "[OK] SNMP responded via GET-NEXT probe (starting at 1.3)." -ForegroundColor Green
+                if ($first.OID -eq $sysDescrOID -and $first.Value) {
+                    Write-Host ("sysDescr.0: " + $first.Value)
+                } else {
+                    Write-Host ("First VB: {0} -> {1}" -f $first.OID, $first.Value)
+                }
+            }
+        }
+    }
+    if ($snmpOk) {
+        # Skip the rest of the failure diagnostics since fallback succeeded
+        goto AfterSnmpFailureDiagnostics
+    }
     $sameSubnet = $false
     if ($local -and $local.IPAddress -and $local.PrefixLength) {
         $sameSubnet = Test-IsSameSubnet -LocalIp $local.IPAddress -LocalPrefix $local.PrefixLength -TargetIp $ip
@@ -658,6 +686,7 @@ if ($null -ne $resp -and $resp.Length -gt 0) {
         Write-Host ("Action: Check whether SNMP is disabled on the printer via https://{0} . If SNMP is enabled, contact the network administrator to verify SNMP communication on the layer-2 network between {1} and {0}." -f $ip, $local.IPAddress)
     }
     # Inspect Windows Firewall for potential blocks
+    :AfterSnmpFailureDiagnostics
     try {
         $fwBlocks = Get-PossibleFirewallBlocksForSnmp -TargetIp $ip
         if ($fwBlocks -and $fwBlocks.Count -gt 0) {
@@ -672,6 +701,20 @@ if ($null -ne $resp -and $resp.Length -gt 0) {
     } catch {
         Write-Host "[INFO] Skipped firewall inspection (insufficient privileges or cmdlets unavailable)." -ForegroundColor DarkGray
     }
+    # Additional hint for common Xerox access control: if local and target differ in /24 but are within a /23,
+    # some devices may have IP Filtering that only allows the 10.x.y.0/24 half containing the printer.
+    try {
+        if ($sameSubnet -and $local -and $local.IPAddress -and $ip) {
+            $local24 = ($local.IPAddress -split '\.')[0..2] -join '.'
+            $target24 = ($ip -split '\.')[0..2] -join '.'
+            if ($local24 -ne $target24) {
+                Write-Host "[HINT] This PC is 10.x.${($local.IPAddress -split '\.')[2]}.x and the printer is ${target24}.x." -ForegroundColor Yellow
+                Write-Host "       If the printer has IP Filtering/Access Control allowing only its own /24 (e.g., ${target24}.0/24), SNMP from ${local24}.0/24 will be dropped." -ForegroundColor Yellow
+                Write-Host "       Check Properties → Security/Connectivity → IP Filtering (IPv4) / Access Control on the Xerox and allow this PC/subnet or disable the filter." -ForegroundColor Yellow
+            }
+        }
+    } catch {}
+    $snmpOk = $false
 }
 
 # ---------------------------
@@ -693,6 +736,10 @@ function Get-SnmpFirstUnder {
     return $null
 }
 
+if (-not $snmpOk) {
+    Write-Host "`n[INFO] Skipping additional SNMP queries (sysName/serial/page count) because the initial SNMP test failed." -ForegroundColor DarkGray
+    goto AfterSnmpQueries
+}
 # ---------------------------
 # Quick Device Info (name / serial / page count)
 # ---------------------------
@@ -725,7 +772,8 @@ $descBase = "1.3.6.1.2.1.43.11.1.1.9"
 $levelBase = "1.3.6.1.2.1.43.11.1.1.8"
 $maxBase  = "1.3.6.1.2.1.43.11.1.1.7"
 
-Write-Host "`nQuerying Printer-MIB supplies (best-effort walk)..." -ForegroundColor Yellow
+if ($snmpOk) {
+    Write-Host "`nQuerying Printer-MIB supplies (best-effort walk)..." -ForegroundColor Yellow
 
 function Get-SnmpWalkBaseOid {
     param(
@@ -749,50 +797,52 @@ function Get-SnmpWalkBaseOid {
     return $results
 }
 
-$desc = Get-SnmpWalkBaseOid -TargetIp $ip -Community $community -BaseOID $descBase
-$level = Get-SnmpWalkBaseOid -TargetIp $ip -Community $community -BaseOID $levelBase
-$max   = Get-SnmpWalkBaseOid -TargetIp $ip -Community $community -BaseOID $maxBase
+    $desc = Get-SnmpWalkBaseOid -TargetIp $ip -Community $community -BaseOID $descBase
+    $level = Get-SnmpWalkBaseOid -TargetIp $ip -Community $community -BaseOID $levelBase
+    $max   = Get-SnmpWalkBaseOid -TargetIp $ip -Community $community -BaseOID $maxBase
 
-if ($desc.Count -eq 0 -and $level.Count -eq 0 -and $max.Count -eq 0) {
-    Write-Host "[WARN] No Printer-MIB supplies entries returned. Device may restrict these OIDs or require a different community." -ForegroundColor Yellow
-} else {
-    # Join by trailing index
-    $byIndex = @{}
-    foreach ($d in $desc) {
-        $idx = $d.OID.Substring($descBase.Length+1)
-        $byIndex[$idx] = [ordered]@{ Description = $d.Value; Level = $null; Max = $null }
-    }
-    foreach ($l in $level) {
-        $idx = $l.OID.Substring($levelBase.Length+1)
-        if (-not $byIndex.ContainsKey($idx)) { $byIndex[$idx] = [ordered]@{ Description = $null; Level = $null; Max = $null } }
-        $byIndex[$idx]["Level"] = $l.Value
-    }
-    foreach ($m in $max) {
-        $idx = $m.OID.Substring($maxBase.Length+1)
-        if (-not $byIndex.ContainsKey($idx)) { $byIndex[$idx] = [ordered]@{ Description = $null; Level = $null; Max = $null } }
-        $byIndex[$idx]["Max"] = $m.Value
-    }
-
-    Write-Host "`nSupplies:" -ForegroundColor Cyan
-    "{0,-6}  {1,-30}  {2,8}  {3,8}" -f "Index","Description","Level","Max"
-    "{0,-6}  {1,-30}  {2,8}  {3,8}" -f "-----","-----------","-----","---"
-    foreach ($k in ($byIndex.Keys | Sort-Object {[int]($_ -replace '\D','')})) {
-        $row = $byIndex[$k]
-        $pct = $null
-        if ($row.Level -is [int] -and $row.Max -is [int] -and $row.Max -gt 0) {
-            $pct = [math]::Round(($row.Level / $row.Max) * 100)
+    if ($desc.Count -eq 0 -and $level.Count -eq 0 -and $max.Count -eq 0) {
+        Write-Host "[WARN] No Printer-MIB supplies entries returned. Device may restrict these OIDs or require a different community." -ForegroundColor Yellow
+    } else {
+        # Join by trailing index
+        $byIndex = @{}
+        foreach ($d in $desc) {
+            $idx = $d.OID.Substring($descBase.Length+1)
+            $byIndex[$idx] = [ordered]@{ Description = $d.Value; Level = $null; Max = $null }
         }
-        $descText = if ($row.Description) { [string]$row.Description } else { "(unknown)" }
-        $lvlText  = if ($null -ne $row.Level) { $row.Level } else { "-" }
-        $maxText  = if ($null -ne $row.Max) { $row.Max } else { "-" }
-        $line = "{0,-6}  {1,-30}  {2,8}  {3,8}" -f $k, ($descText.Substring(0,[math]::Min(30,$descText.Length))), $lvlText, $maxText
-        Write-Host $line
-        if ($null -ne $pct) {
-            Write-Host ("         -> ~{0}% remaining" -f $pct)
+        foreach ($l in $level) {
+            $idx = $l.OID.Substring($levelBase.Length+1)
+            if (-not $byIndex.ContainsKey($idx)) { $byIndex[$idx] = [ordered]@{ Description = $null; Level = $null; Max = $null } }
+            $byIndex[$idx]["Level"] = $l.Value
+        }
+        foreach ($m in $max) {
+            $idx = $m.OID.Substring($maxBase.Length+1)
+            if (-not $byIndex.ContainsKey($idx)) { $byIndex[$idx] = [ordered]@{ Description = $null; Level = $null; Max = $null } }
+            $byIndex[$idx]["Max"] = $m.Value
+        }
+
+        Write-Host "`nSupplies:" -ForegroundColor Cyan
+        "{0,-6}  {1,-30}  {2,8}  {3,8}" -f "Index","Description","Level","Max"
+        "{0,-6}  {1,-30}  {2,8}  {3,8}" -f "-----","-----------","-----","---"
+        foreach ($k in ($byIndex.Keys | Sort-Object {[int]($_ -replace '\D','')})) {
+            $row = $byIndex[$k]
+            $pct = $null
+            if ($row.Level -is [int] -and $row.Max -is [int] -and $row.Max -gt 0) {
+                $pct = [math]::Round(($row.Level / $row.Max) * 100)
+            }
+            $descText = if ($row.Description) { [string]$row.Description } else { "(unknown)" }
+            $lvlText  = if ($null -ne $row.Level) { $row.Level } else { "-" }
+            $maxText  = if ($null -ne $row.Max) { $row.Max } else { "-" }
+            $line = "{0,-6}  {1,-30}  {2,8}  {3,8}" -f $k, ($descText.Substring(0,[math]::Min(30,$descText.Length))), $lvlText, $maxText
+            Write-Host $line
+            if ($null -ne $pct) {
+                Write-Host ("         -> ~{0}% remaining" -f $pct)
+            }
         }
     }
 }
 
+:#AfterSnmpQueries
 # ---------------------------
 # Summary for ticket notes (single line, easy to paste)
 # ---------------------------
