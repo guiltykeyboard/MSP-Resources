@@ -104,10 +104,17 @@ function ConvertTo-BerInteger([int]$value) {
             $v = $v -shr 8
         }
         $msb = $tmp[$tmp.Count-1]
-        if (($value -ge 0 -and ($msb -band 0x80) -ne 0) -or ($value -lt 0 -and ($msb -band 0x80) -eq 0)) {
-            $tmp.Add(($value -lt 0) ? 0xFF : 0x00)
+        if ( ($value -ge 0 -and ($msb -band 0x80) -ne 0) -or ($value -lt 0 -and ($msb -band 0x80) -eq 0) ) {
+            if ($value -lt 0) {
+                $tmp.Add([byte]0xFF)
+            } else {
+                $tmp.Add([byte]0x00)
+            }
         }
-        $tmpArr = $tmp.ToArray(); [Array]::Reverse($tmpArr); $tmp = [System.Collections.Generic.List[byte]]::new(); $tmp.AddRange($tmpArr)
+        $tmpArr = $tmp.ToArray()
+        [Array]::Reverse($tmpArr)
+        $tmp = [System.Collections.Generic.List[byte]]::new()
+        $tmp.AddRange($tmpArr)
     }
     $content = $tmp.ToArray()
     return ,0x02 + (ConvertTo-BerLength $content.Length) + $content
