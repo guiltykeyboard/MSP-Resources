@@ -369,32 +369,66 @@ function Invoke-SnmpRequest {
         [string[]]$Oids,
         [int]$TimeoutMs = 6000
     )
+    # Socket state for reuse
+    if (-not $script:snmpSocketState) {
+        $script:snmpSocketState = [ordered]@{
+            BoundIp   = $null
+            SrcPort   = $null
+            TargetIp  = $null
+            UdpClient = $null
+        }
+    }
     # Bind to the same local IPv4 used for routing to the target (if known)
     $bindIp = $null
     try {
         if ($script:local -and $script:local.IPAddress) { $bindIp = $script:local.IPAddress }
     } catch {}
-    $srcPort = 0
+    # Choose a stable source port so responses are easy to receive/inspect.
+    # If SNMP_SRC_PORT is set, use it; otherwise default to 36161.
+    $srcPort = 36161
     try {
         if ($env:SNMP_SRC_PORT) {
             $p = [int]$env:SNMP_SRC_PORT
             if ($p -ge 1024 -and $p -le 65535) { $srcPort = $p }
         }
     } catch {}
-    if ($bindIp) {
-        $localEp = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Parse($bindIp), $srcPort)
-        $udp = [System.Net.Sockets.UdpClient]::new($localEp)
+    $needNewSocket = $true
+    if ($script:snmpSocketState.UdpClient -and
+        $script:snmpSocketState.BoundIp -eq $bindIp -and
+        $script:snmpSocketState.SrcPort -eq $srcPort -and
+        $script:snmpSocketState.TargetIp -eq $TargetIp) {
+        $udp = $script:snmpSocketState.UdpClient
+        $needNewSocket = $false
+    }
+    if ($needNewSocket) {
+        if ($script:snmpSocketState.UdpClient) {
+            try { $script:snmpSocketState.UdpClient.Close() } catch {}
+        }
+        if ($bindIp) {
+            $localEp = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Parse($bindIp), $srcPort)
+            $udp = [System.Net.Sockets.UdpClient]::new($localEp)
+        } else {
+            $udp = [System.Net.Sockets.UdpClient]::new([System.Net.Sockets.AddressFamily]::InterNetwork)
+            # Bind explicitly to 0.0.0.0:srcPort if no specific IP is known
+            $udp.Client.Bind([System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, $srcPort))
+        }
+        $udp.Client.SendBufferSize = 4096
+        $udp.Client.ReceiveBufferSize = 4096
+        $script:snmpSocketState.BoundIp = $bindIp
+        $script:snmpSocketState.SrcPort = $srcPort
+        $script:snmpSocketState.TargetIp = $TargetIp
+        $script:snmpSocketState.UdpClient = $udp
+        $udp.Connect($TargetIp, 161)
+        if ($env:SNMP_DEBUG -eq '1') {
+            $lep = $udp.Client.LocalEndPoint.ToString()
+            Write-Host "[DBG] Local UDP endpoint: $lep" -ForegroundColor DarkGray
+        }
     } else {
-        $udp = [System.Net.Sockets.UdpClient]::new([System.Net.Sockets.AddressFamily]::InterNetwork)
+        # Ensure we are still connected to the intended remote
+        try { $udp.Connect($TargetIp, 161) } catch {}
     }
-    $udp.Client.ReceiveTimeout = $TimeoutMs
-    $udp.Client.SendBufferSize = 4096
-    $udp.Client.ReceiveBufferSize = 4096
-    $udp.Connect($TargetIp, 161)
-    if ($env:SNMP_DEBUG -eq '1') {
-        $lep = $udp.Client.LocalEndPoint.ToString()
-        Write-Host "[DBG] Local UDP endpoint: $lep" -ForegroundColor DarkGray
-    }
+    # Always honor current timeout per call
+    $udp.Client.ReceiveTimeout = [Math]::Max($TimeoutMs, 2000)
 
     # Build packet (strict simple encoder for Xerox)
     $reqId = Get-Random -Minimum 1 -Maximum 32767
@@ -425,11 +459,9 @@ function Invoke-SnmpRequest {
                 $hexr = ($resp | ForEach-Object { $_.ToString('X2') }) -join ' '
                 Write-Host ("[DBG] SNMP RX ({0} bytes): {1}" -f $resp.Length, $hexr) -ForegroundColor DarkGray
             }
-            $udp.Close()
             return ,$resp
         } catch {
             if ($i -lt $attempts) { Start-Sleep -Milliseconds 300; continue }
-            $udp.Close()
             return $null
         }
     }
@@ -750,42 +782,41 @@ function Get-SnmpFirstUnder {
 
 if (-not $snmpOk) {
     Write-Host "`n[INFO] Skipping additional SNMP queries (sysName/serial/page count) because the initial SNMP test failed." -ForegroundColor DarkGray
-    # (skipping further SNMP queries due to failure)
-}
-# ---------------------------
-# Quick Device Info (name / serial / page count)
-# ---------------------------
-Write-Host "`nQuick device info (best-effort)..." -ForegroundColor Yellow
+} else {
+    # ---------------------------
+    # Quick Device Info (name / serial / page count)
+    # ---------------------------
+    Write-Host "`nQuick device info (best-effort)..." -ForegroundColor Yellow
 
-# sysName.0 (1.3.6.1.2.1.1.5.0) – standard SNMPv2-MIB
-$sysNameOID = "1.3.6.1.2.1.1.5.0"
-$sysNameResp = Invoke-SnmpRequest -TargetIp $ip -Community $community -PduTag 0xA0 -Oids @($sysNameOID) -TimeoutMs 1500
-if ($sysNameResp) {
-    $nvb = ConvertFrom-SnmpVarBinds $sysNameResp | Where-Object {$_.OID -eq $sysNameOID} | Select-Object -First 1
-    if ($nvb -and $nvb.Value) {
-        Write-Host (" - sysName.0: {0}" -f $nvb.Value)
+    # sysName.0 (1.3.6.1.2.1.1.5.0) – standard SNMPv2-MIB
+    $sysNameOID = "1.3.6.1.2.1.1.5.0"
+    $sysNameResp = Invoke-SnmpRequest -TargetIp $ip -Community $community -PduTag 0xA0 -Oids @($sysNameOID) -TimeoutMs 1500
+    if ($sysNameResp) {
+        $nvb = ConvertFrom-SnmpVarBinds $sysNameResp | Where-Object {$_.OID -eq $sysNameOID} | Select-Object -First 1
+        if ($nvb -and $nvb.Value) {
+            Write-Host (" - sysName.0: {0}" -f $nvb.Value)
+        }
     }
-}
 
-# prtGeneralSerialNumber (1.3.6.1.2.1.43.5.1.1.17.*) – table; grab first row via GET-NEXT on the column base
-$serialBase = "1.3.6.1.2.1.43.5.1.1.17"
-$serialVb = Get-SnmpFirstUnder -TargetIp $ip -Community $community -BaseOid $serialBase -TimeoutMs 1500
-if ($serialVb -and $serialVb.Value) {
-    Write-Host (" - SerialNumber: {0}  (OID {1})" -f $serialVb.Value, $serialVb.OID)
-}
+    # prtGeneralSerialNumber (1.3.6.1.2.1.43.5.1.1.17.*) – table; grab first row via GET-NEXT on the column base
+    $serialBase = "1.3.6.1.2.1.43.5.1.1.17"
+    $serialVb = Get-SnmpFirstUnder -TargetIp $ip -Community $community -BaseOid $serialBase -TimeoutMs 1500
+    if ($serialVb -and $serialVb.Value) {
+        Write-Host (" - SerialNumber: {0}  (OID {1})" -f $serialVb.Value, $serialVb.OID)
+    }
 
-# prtMarkerLifeCount (1.3.6.1.2.1.43.10.2.1.4.*) – total page count style counter; first row via GET-NEXT
-$pageCountBase = "1.3.6.1.2.1.43.10.2.1.4"
-$pageVb = Get-SnmpFirstUnder -TargetIp $ip -Community $community -BaseOid $pageCountBase -TimeoutMs 1500
-if ($pageVb -and $null -ne $pageVb.Value) {
-    Write-Host (" - TotalPageCounter (prtMarkerLifeCount): {0}  (OID {1})" -f $pageVb.Value, $pageVb.OID)
-}
-$descBase = "1.3.6.1.2.1.43.11.1.1.9"
-$levelBase = "1.3.6.1.2.1.43.11.1.1.8"
-$maxBase  = "1.3.6.1.2.1.43.11.1.1.7"
+    # prtMarkerLifeCount (1.3.6.1.2.1.43.10.2.1.4.*) – total page count style counter; first row via GET-NEXT
+    $pageCountBase = "1.3.6.1.2.1.43.10.2.1.4"
+    $pageVb = Get-SnmpFirstUnder -TargetIp $ip -Community $community -BaseOid $pageCountBase -TimeoutMs 1500
+    if ($pageVb -and $null -ne $pageVb.Value) {
+        Write-Host (" - TotalPageCounter (prtMarkerLifeCount): {0}  (OID {1})" -f $pageVb.Value, $pageVb.OID)
+    }
+    $descBase = "1.3.6.1.2.1.43.11.1.1.9"
+    $levelBase = "1.3.6.1.2.1.43.11.1.1.8"
+    $maxBase  = "1.3.6.1.2.1.43.11.1.1.7"
 
-if ($snmpOk) {
-    Write-Host "`nQuerying Printer-MIB supplies (best-effort walk)..." -ForegroundColor Yellow
+    if ($snmpOk) {
+        Write-Host "`nQuerying Printer-MIB supplies (best-effort walk)..." -ForegroundColor Yellow
 
 function Get-SnmpWalkBaseOid {
     param(
@@ -807,6 +838,7 @@ function Get-SnmpWalkBaseOid {
         $current = $vb.OID
     }
     return $results
+    }
 }
 
     $desc = Get-SnmpWalkBaseOid -TargetIp $ip -Community $community -BaseOID $descBase
