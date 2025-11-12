@@ -291,32 +291,63 @@ function Invoke-SnmpRequest {
         [string]$Community,
         [byte]$PduTag,                 # 0xA0=GetRequest, 0xA1=GetNextRequest
         [string[]]$Oids,
-        [int]$TimeoutMs = 2000
+        [int]$TimeoutMs = 4000
     )
-    # Force IPv4 and explicit timeout
-    $udp = [System.Net.Sockets.UdpClient]::new([System.Net.Sockets.AddressFamily]::InterNetwork)
+    # Try to bind to the same local IPv4 used for routing to the target
+    $bindIp = $null
+    try {
+        if ($script:local -and $script:local.IPAddress) { $bindIp = $script:local.IPAddress }
+    } catch {}
+
+    if ($bindIp) {
+        $localEp = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Parse($bindIp), 0)
+        $udp = [System.Net.Sockets.UdpClient]::new($localEp)
+    } else {
+        $udp = [System.Net.Sockets.UdpClient]::new([System.Net.Sockets.AddressFamily]::InterNetwork)
+    }
     $udp.Client.ReceiveTimeout = $TimeoutMs
     $udp.Connect($TargetIp, 161)
-    try {
-        $reqId = New-RequestId
-        # For the common "single GET for sysDescr" path, use the strict/simple encoder
-        if ($PduTag -eq 0xA0 -and $Oids.Count -eq 1) {
-            $packet = New-SnmpV2cGetPacketSimple -Community $Community -Oid $Oids[0] -RequestId $reqId
-        } else {
-            # Fall back to the generic builder already defined in the script
-            $varBinds = @()
-            foreach ($oid in $Oids) { $varBinds += (New-SnmpVarBind $oid (ConvertTo-BerNull)) }
-            $pdu = New-SnmpGetPdu $PduTag $reqId $varBinds
-            $packet = New-SnmpV2CPacket $Community $pdu
+
+    # Build packet
+    $reqId = Get-Random -Minimum 1 -Maximum 32767   # conservative positive request-id
+    if ($PduTag -eq 0xA0 -and $Oids.Count -eq 1) {
+        $packet = New-SnmpV2cGetPacketSimple -Community $Community -Oid $Oids[0] -RequestId $reqId
+    } else {
+        $varBinds = @()
+        foreach ($oid in $Oids) { $varBinds += (New-SnmpVarBind $oid (ConvertTo-BerNull)) }
+        $pdu = New-SnmpGetPdu $PduTag $reqId $varBinds
+        $packet = New-SnmpV2CPacket $Community $pdu
+    }
+
+    # Optional debug hexdump: set env:SNMP_DEBUG=1 before running to see raw bytes
+    $debug = $env:SNMP_DEBUG -eq '1'
+    if ($debug) {
+        $hex = ($packet | ForEach-Object { $_.ToString('X2') }) -join ' '
+        Write-Host ("[DBG] SNMP TX ({0} bytes): {1}" -f $packet.Length, $hex) -ForegroundColor DarkGray
+    }
+
+    # Send with retries
+    $attempts = 3
+    for ($i=1; $i -le $attempts; $i++) {
+        try {
+            [void]$udp.Send($packet, $packet.Length)
+            $remoteEP = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
+            $resp = $udp.Receive([ref]$remoteEP)
+            if ($debug -and $resp) {
+                $hexr = ($resp | ForEach-Object { $_.ToString('X2') }) -join ' '
+                Write-Host ("[DBG] SNMP RX ({0} bytes): {1}" -f $resp.Length, $hexr) -ForegroundColor DarkGray
+            }
+            $udp.Close()
+            return ,$resp
+        } catch {
+            if ($i -lt $attempts) {
+                Start-Sleep -Milliseconds 300
+                continue
+            } else {
+                $udp.Close()
+                return $null
+            }
         }
-        [void]$udp.Send($packet, $packet.Length)
-        $remoteEP = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
-        $resp = $udp.Receive([ref]$remoteEP)
-        return ,$resp
-    } catch {
-        return $null
-    } finally {
-        $udp.Close()
     }
 }
 
