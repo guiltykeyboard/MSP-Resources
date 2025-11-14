@@ -143,6 +143,7 @@ $Keep = $Keep.ToLower()
 
 $wingetPrefixes = @(
   '^Microsoft 365 - (?<lang>[a-z]{2}-[a-z]{2})\b',
+  '^Microsoft 365 Apps.*-\s*(?<lang>[a-z]{2}-[a-z]{2})\b',
   '^OneNote - (?<lang>[a-z]{2}-[a-z]{2})\b',
   '^Microsoft OneNote - (?<lang>[a-z]{2}-[a-z]{2})\b'
 )
@@ -192,7 +193,7 @@ function Get-InstalledC2RLanguages {
       Get-ChildItem $root -ErrorAction Stop | ForEach-Object {
         try {
           $dn = (Get-ItemProperty $_.PsPath -Name DisplayName -ErrorAction Stop).DisplayName
-          if ($dn -match '^Microsoft 365\s*-\s*(?<lang>[a-z]{2}-[a-z]{2})$') {
+          if ($dn -match '^Microsoft 365(?: Apps.*)?\s*-\s*(?<lang>[a-z]{2}-[a-z]{2})$') {
             [void]$langs.Add($Matches['lang'].ToLower())
           }
           elseif ($dn -match '^Microsoft OneNote\s*-\s*(?<lang>[a-z]{2}-[a-z]{2})$' -or $dn -match '^OneNote\s*-\s*(?<lang>[a-z]{2}-[a-z]{2})$') {
@@ -562,7 +563,7 @@ if ($VerboseLog) {
       Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
         try {
           $dn = (Get-ItemProperty $_.PsPath -Name DisplayName -ErrorAction Stop).DisplayName
-          if ($dn -match '^(Microsoft 365|Microsoft OneNote|OneNote)\s*-\s*[a-z]{2}-[a-z]{2}$') { VStamp "[arp] $dn" }
+          if ($dn -match '^(Microsoft 365(?: Apps.*)?|Microsoft OneNote|OneNote)\s*-\s*[a-z]{2}-[a-z]{2}$') { VStamp "[arp] $dn" }
         } catch {}
       }
     }
@@ -620,7 +621,7 @@ try {
     Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
       try {
         $dn = (Get-ItemProperty $_.PsPath -Name DisplayName -ErrorAction Stop).DisplayName
-        if ($dn -match '^(Microsoft 365|Microsoft OneNote|OneNote)\s*-\s*[a-z]{2}-[a-z]{2}$' -and $dn -notmatch "\b$([regex]::Escape($Keep))\b") { $remainingARPDisplay += $dn }
+        if ($dn -match '^(Microsoft 365(?: Apps.*)?|Microsoft OneNote|OneNote)\s*-\s*[a-z]{2}-[a-z]{2}$' -and $dn -notmatch "\b$([regex]::Escape($Keep))\b") { $remainingARPDisplay += $dn }
       } catch {}
     }
   }
