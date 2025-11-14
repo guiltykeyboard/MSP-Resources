@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
   [string]$Keep = 'en-us',
   [switch]$WhatIf,
@@ -269,29 +269,37 @@ function Remove-WithODT {
           'https://officecdn.microsoft.com/pr/wsus/ofl/OfficeDeploymentTool.exe',
           'https://download.microsoft.com/download/2/6/8/26864f2e-1a3e-4ce6-8a44-b5b4b8343561/OfficeDeploymentTool.exe'
         )
-        $downloaded = $null
+
         foreach ($u in $odtUrls) {
+          $downloaded = $null
           try {
             Stamp "[odt] Attempting download: $u"
             $localOdtPath = Join-Path $work 'OfficeDeploymentTool.exe'
             Invoke-WebRequest -UseBasicParsing -Uri $u -OutFile $localOdtPath -ErrorAction Stop
             $downloaded = Get-Item -LiteralPath $localOdtPath -ErrorAction Stop
             Stamp "[odt] Downloaded ODT: $($downloaded.FullName)"
-            break
           } catch {
             Stamp "[odt] Download from $u failed: $($_.Exception.Message)"
+            continue
           }
-        }
 
-        if ($downloaded) {
+          # Try to extract; if it fails, move on to the next URL
           try {
             & $downloaded.FullName /quiet /extract:$work | Out-Null
           } catch {
             Stamp "[odt] Extraction from downloaded ODT failed: $($_.Exception.Message)"
+            try { Remove-Item -LiteralPath $downloaded.FullName -Force -ErrorAction SilentlyContinue } catch {}
+            continue
           }
 
-          # Re-scan workdir recursively for setup.exe after download
+          # Re-scan workdir recursively for setup.exe after extraction
           $setup = Get-ChildItem -Path $work -Filter 'setup.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if ($setup) {
+            break
+          } else {
+            Stamp "[odt] No setup.exe found after extraction from $u; trying next URL."
+            try { Remove-Item -LiteralPath $downloaded.FullName -Force -ErrorAction SilentlyContinue } catch {}
+          }
         }
       }
     }
