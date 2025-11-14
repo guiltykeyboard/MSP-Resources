@@ -93,12 +93,13 @@ function Invoke-SelfUpdateIfOutdated {
     Write-Output "SELF-UPDATE: Downloaded latest script ($latest). Re-launching..."
     $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$tmp`"") +
                ($PSBoundParameters.GetEnumerator() | ForEach-Object {
-                 if ($_.Key -eq 'SelfUpdated') { return $null }
-                 if ($_.Value -is [switch]) { if ($_.Value) { "-$(
-$_.Key)" } }
-                 else { "-$(
-$_.Key)"; "$(
-$_.Value)" }
+                 # Do not forward internal self-update parameters as script parameters
+                 if ($_.Key -in @('SelfUpdated','RepoRelPath','Repo','Ref','Skip')) { return $null }
+                 if ($_.Value -is [switch]) {
+                   if ($_.Value) { "-$($_.Key)" }
+                 } else {
+                   "-$($_.Key)"; "$($_.Value)"
+                 }
                }) + '-SelfUpdated'
     Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Wait -NoNewWindow
     exit 0
