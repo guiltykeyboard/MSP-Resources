@@ -269,7 +269,8 @@ function Remove-WithODT {
         $officialOdtUrls = @(
           'https://aka.ms/ODT',
           'https://officecdn.microsoft.com/pr/wsus/ofl/OfficeDeploymentTool.exe',
-          'https://download.microsoft.com/download/2/6/8/26864f2e-1a3e-4ce6-8a44-b5b4b8343561/OfficeDeploymentTool.exe'
+          'https://download.microsoft.com/download/2/6/8/26864f2e-1a3e-4ce6-8a44-b5b4b8343561/OfficeDeploymentTool.exe',
+          'https://download.microsoft.com/download/6c1eeb25-cf8b-41d9-8d0d-cc1dbc032140/officedeploymenttool_19029-20278.exe'
         )
 
         foreach ($u in $officialOdtUrls) {
