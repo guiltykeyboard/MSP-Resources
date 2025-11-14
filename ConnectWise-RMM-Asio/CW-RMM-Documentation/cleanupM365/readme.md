@@ -1,5 +1,3 @@
-
-
 # M365 Language Pack Cleanup (Windows)
 
 Removes **all non-English** Microsoft 365 and OneNote language packs, keeping only the language you specify (default: `en-us`).
