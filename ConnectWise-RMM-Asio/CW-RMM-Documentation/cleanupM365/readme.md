@@ -14,7 +14,7 @@ Removes **all non-English** Microsoft 365 and OneNote language packs, keeping on
 Paste this into a **PowerShell** script step in CW RMM to pull the latest version and run it. Change `en-us` to the language you want to keep.
 
 ```powershell
-$Base='https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main';$Rel='ConnectWise-RMM-Asio/Scripts/Windows/M365Cleanup.ps1';$Tmp=Join-Path $env:TEMP ("M365Cleanup_{0}.ps1" -f ([guid]::NewGuid()));try{[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12}catch{};Invoke-WebRequest -UseBasicParsing -Uri "$Base/$Rel" -OutFile $Tmp; & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Tmp -Keep 'en-us'; Remove-Item $Tmp -Force -ErrorAction SilentlyContinue
+Set-ExecutionPolicy -Scope Process Bypass -Force; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}; $url = 'https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main/ConnectWise-RMM-Asio/Scripts/Windows/M365Cleanup.ps1'; $tmp = Join-Path $env:TEMP ('M365Cleanup-{0}.ps1' -f ([guid]::NewGuid())); Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tmp; try { & $tmp -Keep 'en-us' -SelfUpdated } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
 ```
 
 > Tip: Append `-WhatIf` to preview what would be removed without making changes.
