@@ -209,7 +209,11 @@ function Remove-WithODT {
   param([string]$KeepLang, [switch]$WhatIf)
 
   $productId = Get-C2RProductId
-  if (-not $productId) {
+  $productIds = @()
+  if ($productId) {
+    $productIds = $productId -split '[\s,;]+' | Where-Object { $_ }
+  }
+  if (-not $productIds -or $productIds.Count -eq 0) {
     Stamp "[odt] No Click-to-Run product detected; skipping ODT removal."
     return @()
   }
@@ -226,7 +230,7 @@ function Remove-WithODT {
   }
 
   if (-not $removeLangs) {
-    Stamp "[odt] No non-$KeepLang languages detected for $productId."
+    Stamp "[odt] No non-$KeepLang languages detected for $($productIds -join ', ')."
     return @()
   }
 
@@ -357,15 +361,17 @@ function Remove-WithODT {
     $xml = @()
     $xml += '<Configuration>'
     $xml += '  <Remove>'
-    $xml += "    <Product ID=""$productId"">"
-    foreach ($l in $removeLangs) { $xml += "      <Language ID=""$l"" />" }
-    $xml += '    </Product>'
+    foreach ($prodId in $productIds) {
+      $xml += "    <Product ID=""$prodId"">"
+      foreach ($l in $removeLangs) { $xml += "      <Language ID=""$l"" />" }
+      $xml += '    </Product>'
+    }
     $xml += '  </Remove>'
     $xml += '  <Display Level="None" AcceptEULA="TRUE" />'
     $xml += '</Configuration>'
     $xml -join "`r`n" | Set-Content -Path $xmlPath -Encoding UTF8
 
-    Stamp "[odt] Product: $productId  Pending language removals: $($removeLangs -join ', ')"
+    Stamp "[odt] Product(s): $($productIds -join ', ')  Pending language removals: $($removeLangs -join ', ')"
     if ($WhatIf) {
       Stamp "[odt] (WhatIf) $setup /configure $xmlPath"
       return $removeLangs
