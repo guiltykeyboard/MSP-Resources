@@ -240,10 +240,8 @@ function Get-InstalledC2RLanguages {
       Get-ChildItem $root -ErrorAction Stop | ForEach-Object {
         try {
           $dn = (Get-ItemProperty $_.PsPath -Name DisplayName -ErrorAction Stop).DisplayName
-          if ($dn -match '^Microsoft 365(?: Apps.*)?\s*-\s*(?<lang>[a-z]{2}-[a-z]{2})$') {
-            [void]$langs.Add($Matches['lang'].ToLower())
-          }
-          elseif ($dn -match '^Microsoft OneNote\s*-\s*(?<lang>[a-z]{2}-[a-z]{2})$' -or $dn -match '^OneNote\s*-\s*(?<lang>[a-z]{2}-[a-z]{2})$') {
+          if (-not $dn) { return }
+          if ($dn -match '(Microsoft 365|OneNote)[^-]*-\s*(?<lang>[a-z]{2}-[a-z]{2})$') {
             [void]$langs.Add($Matches['lang'].ToLower())
           }
         } catch { }
@@ -333,9 +331,9 @@ function Remove-WithODT {
       if (-not $setup) {
         # First try official Microsoft URLs so we pick up new versions automatically
         $officialOdtUrls = @(
-          'https://aka.ms/ODT',
-          'https://officecdn.microsoft.com/pr/wsus/ofl/OfficeDeploymentTool.exe',
-          'https://download.microsoft.com/download/2/6/8/26864f2e-1a3e-4ce6-8a44-b5b4b8343561/OfficeDeploymentTool.exe',
+          # Direct link from the current Microsoft Download Center page for ODT.
+          # The others (aka.ms + wsus + old download URL) are returning HTML/400/404
+          # in this environment, so we skip them for reliability.
           'https://download.microsoft.com/download/6c1eeb25-cf8b-41d9-8d0d-cc1dbc032140/officedeploymenttool_19029-20278.exe'
         )
 
@@ -500,6 +498,18 @@ function Remove-WithODT {
       }
     }
 
+    # Re-check languages to see what actually changed after ODT
+    try {
+      $afterLangs = Get-InstalledC2RLanguages
+      $removedByOdt = $removeLangs | Where-Object { $_ -notin $afterLangs }
+      if ($removedByOdt -and $removedByOdt.Count -gt 0) {
+        Stamp "[odt] Languages removed by ODT (detected): $($removedByOdt -join ', ')"
+      } else {
+        Stamp "[odt] No language removals detected from ODT run."
+      }
+    } catch {
+      Stamp "[odt] WARNING: Unable to diff languages after ODT run: $($_.Exception.Message)"
+    }
     # Best-effort restart of ClickToRunSvc after ODT finishes
     Start-OfficeC2RService
     return $removeLangs
@@ -615,7 +625,7 @@ if ($VerboseLog) {
       Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
         try {
           $dn = (Get-ItemProperty $_.PsPath -Name DisplayName -ErrorAction Stop).DisplayName
-          if ($dn -match '^(Microsoft 365(?: Apps.*)?|Microsoft OneNote|OneNote)\s*-\s*[a-z]{2}-[a-z]{2}$') { VStamp "[arp] $dn" }
+          if ($dn -match '(Microsoft 365|OneNote)[^-]*-\s*(?<lang>[a-z]{2}-[a-z]{2})$') { VStamp "[arp] $dn" }
         } catch {}
       }
     }
@@ -673,7 +683,10 @@ try {
     Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
       try {
         $dn = (Get-ItemProperty $_.PsPath -Name DisplayName -ErrorAction Stop).DisplayName
-        if ($dn -match '^(Microsoft 365(?: Apps.*)?|Microsoft OneNote|OneNote)\s*-\s*[a-z]{2}-[a-z]{2}$' -and $dn -notmatch "\b$([regex]::Escape($Keep))\b") { $remainingARPDisplay += $dn }
+        if (-not $dn) { return }
+        if ($dn -match '(Microsoft 365|OneNote)[^-]*-\s*(?<lang>[a-z]{2}-[a-z]{2})$' -and $Matches['lang'].ToLower() -ne $Keep.ToLower()) {
+          $remainingARPDisplay += $dn
+        }
       } catch {}
     }
   }
