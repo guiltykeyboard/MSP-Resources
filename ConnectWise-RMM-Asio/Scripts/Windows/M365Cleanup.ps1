@@ -159,6 +159,53 @@ function VStamp([string]$msg) {
   if ($VerboseLog) { Stamp $msg }
 }
 
+# Helper: Stop all Office/Click-to-Run processes and ClickToRunSvc service to avoid ODT exit code 17006
+function Stop-OfficeC2RActivity {
+  param([switch]$WhatIf)
+
+  # Known Office/Click-to-Run processes that block ODT with exit code 17006
+  $procNames = @(
+    'WINWORD','EXCEL','MSACCESS','GROOVE','OUTLOOK','ONENOTE','POWERPNT',
+    'MSPUB','LYNC','WINPROJ','VISIO','ACCICONS','lynchtmlconv','PPTICO',
+    'OfficeClickToRun'
+  )
+
+  foreach ($name in $procNames) {
+    try {
+      $procs = Get-Process -Name $name -ErrorAction SilentlyContinue
+      if ($procs) {
+        $ids = $procs.Id -join ','
+        Stamp "[odt] Stopping process $name (PID: $ids)"
+        if (-not $WhatIf) {
+          $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+        }
+      }
+    } catch { }
+  }
+
+  # Also stop the ClickToRunSvc service if it is running
+  try {
+    $svc = Get-Service -Name 'ClickToRunSvc' -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -ne 'Stopped') {
+      Stamp "[odt] Stopping service ClickToRunSvc (status: $($svc.Status))"
+      if (-not $WhatIf) {
+        Stop-Service -Name 'ClickToRunSvc' -Force -ErrorAction SilentlyContinue
+      }
+    }
+  } catch { }
+}
+
+function Start-OfficeC2RService {
+  # Best-effort restart of ClickToRunSvc after ODT completes
+  try {
+    $svc = Get-Service -Name 'ClickToRunSvc' -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -eq 'Stopped') {
+      Stamp "[odt] Starting service ClickToRunSvc"
+      Start-Service -Name 'ClickToRunSvc' -ErrorAction SilentlyContinue
+    }
+  } catch { }
+}
+
 # --- Click-to-Run (C2R) / ODT helpers ----------------------------------------
 function Get-C2RProductId {
   $cfgPath = 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
@@ -371,7 +418,7 @@ function Remove-WithODT {
     # Prepare working directory for launch
     $wd = [string](Split-Path -Parent $setup)
 
-    # Build config XML
+    # Build config XML with FORCEAPPSHUTDOWN property
     $xmlPath = Join-Path $work 'remove_langs.xml'
     $xml = @()
     $xml += '<Configuration>'
@@ -383,10 +430,13 @@ function Remove-WithODT {
     }
     $xml += '  </Remove>'
     $xml += '  <Display Level="None" AcceptEULA="TRUE" />'
+    $xml += '  <Property Name="FORCEAPPSHUTDOWN" Value="TRUE" />'
     $xml += '</Configuration>'
     $xml -join "`r`n" | Set-Content -Path $xmlPath -Encoding UTF8
 
     Stamp "[odt] Product(s): $($productIds -join ', ')  Pending language removals: $($removeLangs -join ', ')"
+    # Ensure Office processes and ClickToRunSvc are not running; these commonly cause ODT exit code 17006
+    Stop-OfficeC2RActivity -WhatIf:$WhatIf
     if ($WhatIf) {
       Stamp "[odt] (WhatIf) $setup /configure $xmlPath"
       return $removeLangs
@@ -450,6 +500,8 @@ function Remove-WithODT {
       }
     }
 
+    # Best-effort restart of ClickToRunSvc after ODT finishes
+    Start-OfficeC2RService
     return $removeLangs
   } finally {
     try { Remove-Item -Path $work -Recurse -Force -ErrorAction SilentlyContinue } catch { }
