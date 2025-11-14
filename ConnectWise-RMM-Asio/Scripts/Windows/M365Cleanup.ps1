@@ -222,6 +222,16 @@ function Remove-WithODT {
     return @()
   }
 
+  # Use only the primary product ID for ODT removal. Some configurations list
+  # multiple ProductReleaseIds (e.g., 'O365HomePremRetail,OneNoteFreeRetail'),
+  # but passing all of them into a single <Remove> config can cause ODT to
+  # fail with a generic exit code (-1) and make no changes.
+  if ($productIds.Count -gt 1) {
+    $primaryId = $productIds[0]
+    VStamp "[odt] Multiple product IDs detected ($($productIds -join ', ')); using primary ID '$primaryId' for language removal."
+    $productIds = @($primaryId)
+  }
+
   # Determine installed languages and compute removals
   $allLangs = Get-InstalledC2RLanguages
   $removeLangs = @()
