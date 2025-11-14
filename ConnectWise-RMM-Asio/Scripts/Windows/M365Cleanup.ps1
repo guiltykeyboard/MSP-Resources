@@ -143,9 +143,9 @@ $Keep = $Keep.ToLower()
 
 $wingetPrefixes = @(
   '^Microsoft 365 - (?<lang>[a-z]{2}-[a-z]{2})\b',
-  '^Microsoft 365 Apps.*-\s*(?<lang>[a-z]{2}-[a-z]{2})\b',
+  '^Microsoft 365.*-\s*(?<lang>[a-z]{2}-[a-z]{2})\b',
   '^OneNote - (?<lang>[a-z]{2}-[a-z]{2})\b',
-  '^Microsoft OneNote - (?<lang>[a-z]{2}-[a-z]{2})\b'
+  '^Microsoft OneNote.*-\s*(?<lang>[a-z]{2}-[a-z]{2})\b'
 )
 
 # Common Office language IDs for aggressive removal (non-exhaustive but broad)
@@ -241,7 +241,7 @@ function Get-InstalledC2RLanguages {
         try {
           $dn = (Get-ItemProperty $_.PsPath -Name DisplayName -ErrorAction Stop).DisplayName
           if (-not $dn) { return }
-          if ($dn -match '(Microsoft 365|OneNote)[^-]*-\s*(?<lang>[a-z]{2}-[a-z]{2})$') {
+          if ($dn -match '(Microsoft 365|OneNote).*-+\s*(?<lang>[a-z]{2}-[a-z]{2})$') {
             [void]$langs.Add($Matches['lang'].ToLower())
           }
         } catch { }
@@ -611,6 +611,7 @@ function Remove-WithAppx {
 Stamp "Start language cleanup. Keeping: $Keep"
 $appxRemoved   = @()
 $wingetRemoved = @()
+$odtRemoved    = @()
 
 # Run Appx fallback if winget found nothing (or belt-and-suspenders)
 if (-not $wingetRemoved) {
@@ -625,7 +626,7 @@ if ($VerboseLog) {
       Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
         try {
           $dn = (Get-ItemProperty $_.PsPath -Name DisplayName -ErrorAction Stop).DisplayName
-          if ($dn -match '(Microsoft 365|OneNote)[^-]*-\s*(?<lang>[a-z]{2}-[a-z]{2})$') { VStamp "[arp] $dn" }
+          if ($dn -match '(Microsoft 365|OneNote).*-+\s*(?<lang>[a-z]{2}-[a-z]{2})$') { VStamp "[arp] $dn" }
         } catch {}
       }
     }
@@ -640,7 +641,7 @@ if ($arpLangs.Count -gt 0 -or $AggressiveODT) {
   } else {
     Stamp "[odt] Aggressive mode requested; attempting ODT removal even though detection is empty."
   }
-  Remove-WithODT -KeepLang $Keep -WhatIf:$WhatIf
+$odtRemoved = Remove-WithODT -KeepLang $Keep -WhatIf:$WhatIf
 }
 
 # Recompute ARP detection after ODT
@@ -684,7 +685,7 @@ try {
       try {
         $dn = (Get-ItemProperty $_.PsPath -Name DisplayName -ErrorAction Stop).DisplayName
         if (-not $dn) { return }
-        if ($dn -match '(Microsoft 365|OneNote)[^-]*-\s*(?<lang>[a-z]{2}-[a-z]{2})$' -and $Matches['lang'].ToLower() -ne $Keep.ToLower()) {
+        if ($dn -match '(Microsoft 365|OneNote).*-+\s*(?<lang>[a-z]{2}-[a-z]{2})$' -and $Matches['lang'].ToLower() -ne $Keep.ToLower()) {
           $remainingARPDisplay += $dn
         }
       } catch {}
@@ -692,7 +693,7 @@ try {
   }
 } catch {}
 
-Stamp "Summary: removed via winget = $($wingetRemoved.Count), via appx = $($appxRemoved.Count)"
+Stamp "Summary: removed via ODT = $($odtRemoved.Count), via winget = $($wingetRemoved.Count), via appx = $($appxRemoved.Count)"
 if ($remainingWinget.Count -eq 0 -and $remainingAppx.Count -eq 0 -and $remainingC2R.Count -eq 0 -and $remainingARPDisplay.Count -eq 0) {
   Stamp "Remaining language packs (MS365/OneNote): none"
 } else {
