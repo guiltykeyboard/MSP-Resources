@@ -15,6 +15,12 @@ Paste this into a **PowerShell** script step in CW RMM to pull the latest versio
 Set-ExecutionPolicy -Scope Process Bypass -Force; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}; $url = 'https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main/ConnectWise-RMM-Asio/Scripts/Windows/M365Cleanup.ps1'; $tmp = Join-Path $env:TEMP ('M365Cleanup-{0}.ps1' -f ([guid]::NewGuid())); Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tmp; try { & $tmp -Keep 'en-us' -SelfUpdated } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
 ```
 
+## Test ODT Download
+
+```powershell
+$scriptDir=Split-Path -Parent $MyInvocation.MyCommand.Path;$urls=@('https://aka.ms/ODT','https://officecdn.microsoft.com/pr/wsus/ofl/OfficeDeploymentTool.exe','https://download.microsoft.com/download/2/6/8/26864f2e-1a3e-4ce6-8a44-b5b4b8343561/OfficeDeploymentTool.exe');$dest=Join-Path $scriptDir 'OfficeDeploymentTool.exe';foreach($u in $urls){Write-Host "`nTrying $u" -ForegroundColor Yellow;try{Invoke-WebRequest -Uri $u -OutFile $dest -UseBasicParsing -ErrorAction Stop;Write-Host "Downloaded to: $dest" -ForegroundColor Green;$i=Get-Item $dest;Write-Host "Size: $($i.Length) bytes  Modified: $($i.LastWriteTime)";$sig=(Get-Content $dest -TotalCount 2) -join "`n";Write-Host "Header:`n$sig" -ForegroundColor Cyan;if($sig -match '<html|<!DOCTYPE html'){Write-Warning "This is HTML, not EXE!"}else{Write-Host "Looks like a real EXE." -ForegroundColor Green};break}catch{Write-Warning $_.Exception.Message}}
+```
+
 > Tip: Append `-WhatIf` to preview what would be removed without making changes.
 
 ## Parameters

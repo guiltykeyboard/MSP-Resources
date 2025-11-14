@@ -4,7 +4,8 @@ param(
   [switch]$WhatIf,
   [switch]$SelfUpdated,  # internal guard to avoid update loops
   [switch]$VerboseLog,                 # extra diagnostics to RMM log
-  [switch]$AggressiveODT               # remove a wide set of languages via ODT even if detection fails
+  [switch]$AggressiveODT,              # remove a wide set of languages via ODT even if detection fails
+  [string]$OdtCustomUrl                # optional override URL for Office Deployment Tool EXE
 )
 
 
@@ -264,13 +265,14 @@ function Remove-WithODT {
 
       # 3) If still no setup.exe, attempt download from Microsoft CDN
       if (-not $setup) {
-        $odtUrls = @(
+        # First try official Microsoft URLs so we pick up new versions automatically
+        $officialOdtUrls = @(
           'https://aka.ms/ODT',
           'https://officecdn.microsoft.com/pr/wsus/ofl/OfficeDeploymentTool.exe',
           'https://download.microsoft.com/download/2/6/8/26864f2e-1a3e-4ce6-8a44-b5b4b8343561/OfficeDeploymentTool.exe'
         )
 
-        foreach ($u in $odtUrls) {
+        foreach ($u in $officialOdtUrls) {
           $downloaded = $null
           try {
             Stamp "[odt] Attempting download: $u"
@@ -297,8 +299,29 @@ function Remove-WithODT {
           if ($setup) {
             break
           } else {
-            Stamp "[odt] No setup.exe found after extraction from $u; trying next URL."
+            Stamp "[odt] No setup.exe found after extraction from $u; trying next official URL."
             try { Remove-Item -LiteralPath $downloaded.FullName -Force -ErrorAction SilentlyContinue } catch {}
+          }
+        }
+
+        # If official URLs all fail and a custom URL is provided, use it as a stable fallback
+        if (-not $setup -and $OdtCustomUrl) {
+          Stamp "[odt] Official ODT URLs failed; using custom ODT URL fallback: $OdtCustomUrl"
+          try {
+            $localOdtPath = Join-Path $work 'OfficeDeploymentTool.exe'
+            Invoke-WebRequest -UseBasicParsing -Uri $OdtCustomUrl -OutFile $localOdtPath -ErrorAction Stop
+            $downloaded = Get-Item -LiteralPath $localOdtPath -ErrorAction Stop
+            Stamp "[odt] Downloaded ODT from custom URL: $($downloaded.FullName)"
+
+            try {
+              & $downloaded.FullName /quiet /extract:$work | Out-Null
+            } catch {
+              Stamp "[odt] Extraction from custom ODT failed: $($_.Exception.Message)"
+            }
+
+            $setup = Get-ChildItem -Path $work -Filter 'setup.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          } catch {
+            Stamp "[odt] Download from custom ODT URL failed: $($_.Exception.Message)"
           }
         }
       }
