@@ -18,7 +18,7 @@ Set-ExecutionPolicy -Scope Process Bypass -Force; try { [Net.ServicePointManager
 ## Test ODT Download
 
 ```powershell
-$dir=(Get-Location).Path;$html=(Invoke-WebRequest -UseBasicParsing -Uri 'https://aka.ms/ODT').Content;$m=[regex]::Match($html,'https[^"]+OfficeDeploymentTool\.exe');if(-not $m.Success){Write-Warning 'Could not find OfficeDeploymentTool.exe link on aka.ms/ODT page.'}else{$exeUrl=$m.Value;Write-Host "Downloading $exeUrl" -ForegroundColor Yellow;$dest=Join-Path $dir 'OfficeDeploymentTool.exe';Invoke-WebRequest -UseBasicParsing -Uri $exeUrl -OutFile $dest -ErrorAction Stop;$i=Get-Item $dest;Write-Host "Saved to: $($i.FullName)  Size: $($i.Length) bytes" -ForegroundColor Green;}
+$dir=(Get-Location).Path;$u='https://www.microsoft.com/en-us/download/confirmation.aspx?id=49117';Write-Host "Fetching confirmation page..." -ForegroundColor Cyan;$h=Invoke-WebRequest -UseBasicParsing -Uri $u -ErrorAction Stop;$l=$h.Links|Where-Object{ $_.href -match 'download\.microsoft\.com' -and $_.href -match 'officedeploymenttool_.*\.exe'}|Select-Object -First 1;if(-not $l){Write-Warning "Could not find an officedeploymenttool_*.exe link on the confirmation page."}else{$exe=$l.href;Write-Host "Downloading ODT from: $exe" -ForegroundColor Yellow;$dest=Join-Path $dir 'OfficeDeploymentTool.exe';Invoke-WebRequest -UseBasicParsing -Uri $exe -OutFile $dest -ErrorAction Stop;$i=Get-Item $dest;Write-Host "Saved to: $($i.FullName)" -ForegroundColor Green;Write-Host "Size: $($i.Length) bytes  Modified: $($i.LastWriteTime)"}
 ```
 
 > Tip: Append `-WhatIf` to preview what would be removed without making changes.
