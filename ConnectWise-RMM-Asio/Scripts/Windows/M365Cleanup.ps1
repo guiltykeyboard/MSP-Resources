@@ -561,8 +561,6 @@ if ($VerboseLog) {
 
 # If ARP still shows Click-to-Run language components, use ODT to remove them
 $arpLangs = Get-InstalledC2RLanguages | Where-Object { $_ -ne $Keep.ToLower() }
-# If languages still present, skip winget/Appx and go to verification
-$odtNeedsRetry = $false
 if ($arpLangs.Count -gt 0 -or $AggressiveODT) {
   if ($arpLangs.Count -gt 0) {
     Stamp "[odt] Detected Click-to-Run language components still present: $($arpLangs -join ', ')"
@@ -574,21 +572,16 @@ if ($arpLangs.Count -gt 0 -or $AggressiveODT) {
 
 # Recompute ARP detection after ODT
 $arpLangs = Get-InstalledC2RLanguages | Where-Object { $_ -ne $Keep.ToLower() }
-# If languages still present, skip winget/Appx and go to verification
-$odtNeedsRetry = $false
 if ($arpLangs.Count -gt 0) {
-  Stamp "[odt] Languages still present after ODT step; skipping winget/Appx cleanup."
-  $odtNeedsRetry = $true
+  Stamp "[odt] Languages still present after ODT step; proceeding with winget/Appx fallback."
 }
 
-if (-not $odtNeedsRetry) {
-  # Next: Winget removal...
-  $wingetRemoved = Remove-WithWinget -KeepLang $Keep -NamePatterns $wingetPrefixes -WhatIf:$WhatIf
+# Next: Winget removal as a secondary cleanup path
+$wingetRemoved = Remove-WithWinget -KeepLang $Keep -NamePatterns $wingetPrefixes -WhatIf:$WhatIf
 
-  # Appx fallback only if winget found nothing (historical resource packs)
-  if (-not $wingetRemoved) {
-    $appxRemoved = Remove-WithAppx -KeepLang $Keep -WhatIf:$WhatIf
-  }
+# Appx fallback only if winget found nothing (historical resource packs)
+if (-not $wingetRemoved) {
+  $appxRemoved = Remove-WithAppx -KeepLang $Keep -WhatIf:$WhatIf
 }
 
 # --- Post-run verification (helpful in RMM logs) ------------------------------
