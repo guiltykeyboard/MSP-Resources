@@ -113,9 +113,13 @@ Invoke-SelfUpdateIfOutdated -RepoRelPath 'ConnectWise-RMM-Asio/Scripts/Windows/M
 
 # --- RMM / Console detection --------------------------------------------------
 function Test-IsCWRMM {
-  return ($env:ASIO -or $env:CONNECTWISE_RMM -or $env:CW_CONTROL -or $env:SCREENCONNECT_URL) `
-         -or ($env:ProgramData -match 'ConnectWise') `
-         -or ($env:Path -match 'ConnectWise\\RMM')
+  # Treat as RMM/Control only when explicit environment flags are present.
+  # This avoids suppressing interactive progress when a tech runs the script
+  # manually on an agent machine that merely has ConnectWise installed.
+  return ($env:ASIO -or
+          $env:CONNECTWISE_RMM -or
+          $env:CW_CONTROL -or
+          $env:SCREENCONNECT_URL)
 }
 
 $IsCWRMM = Test-IsCWRMM
