@@ -235,7 +235,7 @@ function Remove-WithODT {
     # Resolve likely locations
     $scriptDir = Split-Path -Parent $PSCommandPath
 
-    # 1) Try to find an existing setup.exe (script dir, work dir, TEMP tree)
+    # 1) Try to find an existing auto.exe (script dir, work dir, TEMP tree)
     $setup = @(
       Get-ChildItem -LiteralPath $scriptDir -Filter 'setup.exe' -File -ErrorAction SilentlyContinue
       Get-ChildItem -LiteralPath $work      -Filter 'setup.exe' -File -ErrorAction SilentlyContinue
