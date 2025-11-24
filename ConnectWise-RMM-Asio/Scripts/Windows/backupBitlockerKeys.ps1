@@ -91,7 +91,8 @@ function Invoke-SelfUpdateIfOutdated {
     [Parameter(Mandatory)][string]$RepoRelPath,
     [string]$Repo = 'guiltykeyboard/MSP-Resources',
     [string]$Ref = 'main',
-    [switch]$Skip
+    [switch]$Skip,
+    [hashtable]$OriginalArgs
   )
   if ($Skip) { return }
   $latest = Get-RepoLatestShortSHA -Repo $Repo -Ref $Ref
@@ -124,15 +125,18 @@ function Invoke-SelfUpdateIfOutdated {
     }
 
     Write-Output "SELF-UPDATE: Downloaded latest script ($latest). Re-launching..."
-    $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$tmp`"") +
-               ($PSBoundParameters.GetEnumerator() | ForEach-Object {
-                 if ($_.Key -eq 'SelfUpdated') { return $null }
-                 if ($_.Value -is [switch]) { if ($_.Value) { "-$(
-$_.Key)" } }
-                 else { "-$(
-$_.Key)"; "$(
-$_.Value)" }
-               }) + '-SelfUpdated'
+    $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$tmp`"")
+    if ($OriginalArgs) {
+      $argList += ($OriginalArgs.GetEnumerator() | ForEach-Object {
+        if ($_.Key -eq 'SelfUpdated') { return $null }
+        if ($_.Value -is [switch]) {
+          if ($_.Value) { "-$($_.Key)" }
+        } else {
+          "-$($_.Key)"; "$($_.Value)"
+        }
+      })
+    }
+    $argList += '-SelfUpdated'
     Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Wait -NoNewWindow
     exit 0
   } catch {
@@ -140,7 +144,7 @@ $_.Value)" }
   }
 }
 
-Invoke-SelfUpdateIfOutdated -RepoRelPath 'ConnectWise-RMM-Asio/Scripts/Windows/backupBitlockerKeys.ps1' -Skip:$SelfUpdated
+Invoke-SelfUpdateIfOutdated -RepoRelPath 'ConnectWise-RMM-Asio/Scripts/Windows/backupBitlockerKeys.ps1' -Skip:$SelfUpdated -OriginalArgs $PSBoundParameters
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
