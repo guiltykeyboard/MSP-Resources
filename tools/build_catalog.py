@@ -8,6 +8,8 @@ from typing import Dict, List, Tuple
 # --- repo locations ---
 REPO = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO / "ConnectWise-RMM-Asio" / "Scripts"
+STANDALONE_DIR = REPO / "Standalone"
+PSA_DIR = REPO / "ConnectWise-PSA"
 README = REPO / "README.md"
 
 # which file types count as scripts in the catalog
@@ -16,19 +18,20 @@ SCRIPT_EXTS = {".ps1", ".psm1", ".py", ".sh"}
 # Simple synopsis detector for PowerShell files
 _SYNOPSIS_RE = re.compile(r"^\s*<\#.*?\.SYNOPSIS.*?\#>", re.IGNORECASE | re.DOTALL | re.MULTILINE)
 
-MARKER_START = "<!-- BEGIN SCRIPT CATALOG -->"
-MARKER_END = "<!-- END SCRIPT CATALOG -->"
+MARKER_START = "<!-- GENERATED-CATALOG:START -->"
+MARKER_END = "<!-- GENERATED-CATALOG:END -->"
 
 
-def render_catalog_block(data: Dict[str, List[Tuple[str, bool]]]) -> str:
+def render_catalog_block(data: Dict[str, List[Tuple[str, bool]]], docs: Dict[str, str]) -> str:
     lines: List[str] = []
-    lines.append("## Script Catalog\n\n")
     for sec in sorted(data.keys()):
         lines.append(f"### {sec}\n\n")
         for rel, syn in data[sec]:
             base = Path(rel).name
             syn_tag = " (synopsis)" if syn else ""
-            lines.append(f"- [{base}]({rel}){syn_tag}\n")
+            doc = docs.get(rel)
+            doc_part = f" — [docs]({doc})" if doc else ""
+            lines.append(f"- [{base}]({rel}){doc_part}{syn_tag}\n")
         lines.append("\n")
     return "".join(lines)
 
@@ -46,23 +49,96 @@ def has_synopsis(p: Path) -> bool:
 
 def discover_scripts() -> List[Path]:
     roots: List[Path] = []
-    if SCRIPTS_DIR.is_dir():
-        for p in SCRIPTS_DIR.rglob("*"):
-            if p.is_file() and p.suffix.lower() in SCRIPT_EXTS:
-                roots.append(p)
-    return sorted(roots)
+    for root in [SCRIPTS_DIR, STANDALONE_DIR, PSA_DIR]:
+        if root.is_dir():
+            for p in root.rglob("*"):
+                if p.is_file() and p.suffix.lower() in SCRIPT_EXTS:
+                    roots.append(p)
+    return sorted({p for p in roots})
 
 
 def section_for(p: Path) -> str:
     parts = p.parts
-    # Expect: ConnectWise-RMM-Asio / Scripts / <Platform> / file
-    try:
-        idx = parts.index("Scripts")
-        if idx + 1 < len(parts):
-            return parts[idx + 1]
-    except ValueError:
-        pass
+    # ConnectWise RMM scripts: ConnectWise-RMM-Asio / Scripts / <Platform> / file
+    if "Scripts" in parts:
+        try:
+            idx = parts.index("Scripts")
+            if idx + 1 < len(parts):
+                return parts[idx + 1]
+        except ValueError:
+            pass
+    # Standalone scripts: Standalone / <Category?> / file
+    if "Standalone" in parts:
+        try:
+            idx = parts.index("Standalone")
+            if idx + 1 < len(parts):
+                return parts[idx + 1]
+            return "Standalone"
+        except ValueError:
+            pass
+    # ConnectWise PSA scripts: ConnectWise-PSA / <Category?> / file
+    if "ConnectWise-PSA" in parts:
+        try:
+            idx = parts.index("ConnectWise-PSA")
+            if idx + 1 < len(parts):
+                return parts[idx + 1]
+            return "ConnectWise-PSA"
+        except ValueError:
+            pass
     return "Misc"
+
+
+def normalize_name(s: str) -> str:
+    # strip non-alnum, lowercase
+    return "".join(re.findall(r"[A-Za-z0-9]+", s)).lower()
+
+
+def build_doc_lookup() -> Dict[str, str]:
+    """Return mapping of script relative path -> doc relative path (best-effort)."""
+    docs: List[Path] = []
+
+    # Collect docs that look like README files under known documentation roots
+    doc_roots = [REPO / "ConnectWise-RMM-Asio" / "CW-RMM-Documentation", STANDALONE_DIR, REPO / "ConnectWise-PSA" / "psaDocumentation"]
+    for root in doc_roots:
+        if root.is_dir():
+            for p in root.rglob("*"):
+                if p.is_file() and p.name.lower() in {"readme.md", "readme"}:
+                    docs.append(p)
+
+    # Index docs by normalized folder name (parent dir) to match scripts by stem
+    doc_index: Dict[str, Path] = {}
+    for doc in docs:
+        key = normalize_name(doc.parent.name or doc.stem)
+        doc_index[key] = doc
+
+    mapping: Dict[str, str] = {}
+
+    def best_doc_for(script: Path) -> Path | None:
+        # 1) Same directory README/readme or <script>.md
+        for candidate in [script.parent / "README.md", script.parent / "readme.md", script.parent / f"{script.stem}.md"]:
+            if candidate.is_file():
+                return candidate
+
+        # 2) If in CW RMM tree, try sibling doc folder keyed by script stem
+        stem_key = normalize_name(script.stem)
+        if stem_key in doc_index:
+            return doc_index[stem_key]
+
+        # 3) Fuzzy match on doc folder names (helpful for cases like M365Cleanup vs cleanupM365)
+        import difflib
+
+        if not doc_index:
+            return None
+        matches = difflib.get_close_matches(stem_key, doc_index.keys(), n=1, cutoff=0.5)
+        if matches:
+            return doc_index[matches[0]]
+        return None
+
+    for script in discover_scripts():
+        doc = best_doc_for(script)
+        if doc:
+            mapping[script.relative_to(REPO).as_posix()] = doc.relative_to(REPO).as_posix()
+    return mapping
 
 
 def build_catalog_data(paths: List[Path]) -> Dict[str, List[Tuple[str, bool]]]:
@@ -81,8 +157,8 @@ def build_catalog_data(paths: List[Path]) -> Dict[str, List[Tuple[str, bool]]]:
     return data
 
 
-def render_readme(data: Dict[str, List[Tuple[str, bool]]]) -> str:
-    catalog = render_catalog_block(data)
+def render_readme(data: Dict[str, List[Tuple[str, bool]]], docs: Dict[str, str]) -> str:
+    catalog = render_catalog_block(data, docs)
     block = f"{MARKER_START}\n{catalog}{MARKER_END}\n"
 
     if README.exists():
@@ -152,7 +228,9 @@ def main() -> int:
     scripts = discover_scripts()
     print(f"[build_catalog] Discovered {len(scripts)} scripts (pre-write)")
     data = build_catalog_data(scripts)
-    new_md = render_readme(data)
+    doc_map = build_doc_lookup()
+    print(f"[build_catalog] Matched docs for {len(doc_map)} scripts")
+    new_md = render_readme(data, doc_map)
     write_readme(new_md)
     print(f"[build_catalog] Discovered {len(scripts)} scripts")
     validate_presence(data)

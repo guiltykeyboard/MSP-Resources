@@ -1,3 +1,10 @@
+<#
+.SYNOPSIS
+  Downloads and installs the Cove/N-able Backup Manager with predefined UID, profile, and product.
+.DESCRIPTION
+  Uses the public installer URL, writes it to temp, and launches a silent install configured
+  with the provided UID/PROFILEID/PRODUCT variables. Suitable for deployment via ConnectWise RMM.
+#>
 <# ----- About: ----
     # N-able Backup for Windows - Automatic Deployment
     # Revision v02 - 2021-10-17

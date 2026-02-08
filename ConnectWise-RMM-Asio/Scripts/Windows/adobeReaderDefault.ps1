@@ -1,3 +1,11 @@
+<#
+.SYNOPSIS
+  Sets Adobe Acrobat Reader as the default PDF handler on Windows 10/11.
+.DESCRIPTION
+  Detects an installed Acrobat Reader, builds a default-app associations XML,
+  and imports it system-wide. Intended for ConnectWise RMM or any RMM running
+  PowerShell as SYSTEM.
+#>
 # Set Acrobat Reader as the default PDF app (Windows 10/11)
 # Works via ConnectWise RMM / any RMM that executes PowerShell as System.
 

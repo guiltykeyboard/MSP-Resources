@@ -33,10 +33,41 @@ This repository contains a curated collection of scripts for **ConnectWise RMM (
 ## Script Catalog
 
 <!-- GENERATED-CATALOG:START -->
-- **ConnectWise-RMM-Asio/Scripts**
-  - `ConnectWise-RMM-Asio/Scripts/Windows/backupBitlockerKeys.ps1` — Backup and inventory BitLocker recovery keys on this device.
-  - `ConnectWise-RMM-Asio/Scripts/Windows/checkIfBitlockerEnabled.ps1`
+### Windows
+
+- [adobeReaderDefault.ps1](ConnectWise-RMM-Asio/Scripts/Windows/adobeReaderDefault.ps1) — [docs](ConnectWise-RMM-Asio/CW-RMM-Documentation/adobeReaderDefault/README.md) (synopsis)
+- [backupBitlockerKeys.ps1](ConnectWise-RMM-Asio/Scripts/Windows/backupBitlockerKeys.ps1) — [docs](ConnectWise-RMM-Asio/CW-RMM-Documentation/backupBitlockerKeys/README.md) (synopsis)
+- [checkIfBitlockerEnabled.ps1](ConnectWise-RMM-Asio/Scripts/Windows/checkIfBitlockerEnabled.ps1) — [docs](ConnectWise-RMM-Asio/CW-RMM-Documentation/checkIfBitlockerEnabled/readme.md) (synopsis)
+- [convertWindowsRetailToOEM.ps1](ConnectWise-RMM-Asio/Scripts/Windows/convertWindowsRetailToOEM.ps1) — [docs](ConnectWise-RMM-Asio/CW-RMM-Documentation/convertWindowsRetailToOEM/readme.md) (synopsis)
+- [deployCoveBackupSoftware.ps1](ConnectWise-RMM-Asio/Scripts/Windows/deployCoveBackupSoftware.ps1) — [docs](ConnectWise-RMM-Asio/CW-RMM-Documentation/deployCoveBackupSoftware/README.md) (synopsis)
+- [enableBitlocker.ps1](ConnectWise-RMM-Asio/Scripts/Windows/enableBitlocker.ps1) — [docs](ConnectWise-RMM-Asio/CW-RMM-Documentation/enableBitlocker/README.md) (synopsis)
+- [m365Cleanup.ps1](ConnectWise-RMM-Asio/Scripts/Windows/m365Cleanup.ps1) — [docs](ConnectWise-RMM-Asio/CW-RMM-Documentation/m365Cleanup/readme.md) (synopsis)
+- [modify-sleep-settings.ps1](ConnectWise-RMM-Asio/Scripts/Windows/modify-sleep-settings.ps1) — [docs](ConnectWise-RMM-Asio/CW-RMM-Documentation/modify-sleep-settings/README.md) (synopsis)
+
+### psa-contact-email-automation
+
+- [psa-contacts-to-csv.sh](ConnectWise-PSA/psa-contact-email-automation/psa-contacts-to-csv.sh) — [docs](ConnectWise-PSA/psaDocumentation/psa-contact-email-automation/README.md) (synopsis)
+
+### test-snmp.ps1
+
+- [test-snmp.ps1](Standalone/test-snmp.ps1) — [docs](Standalone/standaloneDocumentation/test-snmp/README.md) (synopsis)
+
+### test-snmp.sh
+
+- [test-snmp.sh](Standalone/test-snmp.sh) — [docs](Standalone/standaloneDocumentation/test-snmp/README.md) (synopsis)
+
+### unifiOSssl.sh
+
+- [unifiOSssl.sh](Standalone/unifiOSssl.sh) — [docs](Standalone/standaloneDocumentation/unifiOSssl/README.md) (synopsis)
+
 <!-- GENERATED-CATALOG:END -->
+
+
+
+
+
+
+
 
 ---
 
