@@ -33,7 +33,16 @@ This repository contains a curated collection of scripts for **ConnectWise RMM (
 ## Script Catalog
 
 <!-- GENERATED-CATALOG:START -->
-### Windows
+### ConnectWise PSA
+
+#### psa-contact-email-automation
+
+- [psa-contacts-to-csv.sh](ConnectWise-PSA/psa-contact-email-automation/psa-contacts-to-csv.sh) — [docs](ConnectWise-PSA/psaDocumentation/psa-contact-email-automation/README.md) (synopsis)
+
+
+### ConnectWise RMM (Asio)
+
+#### Windows
 
 - [adobeReaderDefault.ps1](ConnectWise-RMM-Asio/Scripts/Windows/adobeReaderDefault.ps1) — [docs](ConnectWise-RMM-Asio/CW-RMM-Documentation/adobeReaderDefault/README.md) (synopsis)
 - [backupBitlockerKeys.ps1](ConnectWise-RMM-Asio/Scripts/Windows/backupBitlockerKeys.ps1) — [docs](ConnectWise-RMM-Asio/CW-RMM-Documentation/backupBitlockerKeys/README.md) (synopsis)
@@ -44,23 +53,25 @@ This repository contains a curated collection of scripts for **ConnectWise RMM (
 - [m365Cleanup.ps1](ConnectWise-RMM-Asio/Scripts/Windows/m365Cleanup.ps1) — [docs](ConnectWise-RMM-Asio/CW-RMM-Documentation/m365Cleanup/readme.md) (synopsis)
 - [modify-sleep-settings.ps1](ConnectWise-RMM-Asio/Scripts/Windows/modify-sleep-settings.ps1) — [docs](ConnectWise-RMM-Asio/CW-RMM-Documentation/modify-sleep-settings/README.md) (synopsis)
 
-### psa-contact-email-automation
 
-- [psa-contacts-to-csv.sh](ConnectWise-PSA/psa-contact-email-automation/psa-contacts-to-csv.sh) — [docs](ConnectWise-PSA/psaDocumentation/psa-contact-email-automation/README.md) (synopsis)
+### Standalone
 
-### test-snmp.ps1
+#### test-snmp.ps1
 
 - [test-snmp.ps1](Standalone/test-snmp.ps1) — [docs](Standalone/standaloneDocumentation/test-snmp/README.md) (synopsis)
 
-### test-snmp.sh
+#### test-snmp.sh
 
 - [test-snmp.sh](Standalone/test-snmp.sh) — [docs](Standalone/standaloneDocumentation/test-snmp/README.md) (synopsis)
 
-### unifiOSssl.sh
+#### unifiOSssl.sh
 
 - [unifiOSssl.sh](Standalone/unifiOSssl.sh) — [docs](Standalone/standaloneDocumentation/unifiOSssl/README.md) (synopsis)
 
+
 <!-- GENERATED-CATALOG:END -->
+
+
 
 
 

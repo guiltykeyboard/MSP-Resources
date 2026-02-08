@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, DefaultDict
+from collections import defaultdict
 
 # --- repo locations ---
 REPO = Path(__file__).resolve().parents[1]
@@ -22,16 +23,19 @@ MARKER_START = "<!-- GENERATED-CATALOG:START -->"
 MARKER_END = "<!-- GENERATED-CATALOG:END -->"
 
 
-def render_catalog_block(data: Dict[str, List[Tuple[str, bool]]], docs: Dict[str, str]) -> str:
+def render_catalog_block(data: Dict[str, Dict[str, List[Tuple[str, bool]]]], docs: Dict[str, str]) -> str:
     lines: List[str] = []
-    for sec in sorted(data.keys()):
-        lines.append(f"### {sec}\n\n")
-        for rel, syn in data[sec]:
-            base = Path(rel).name
-            syn_tag = " (synopsis)" if syn else ""
-            doc = docs.get(rel)
-            doc_part = f" — [docs]({doc})" if doc else ""
-            lines.append(f"- [{base}]({rel}){doc_part}{syn_tag}\n")
+    for cat in sorted(data.keys()):
+        lines.append(f"### {cat}\n\n")
+        for sec in sorted(data[cat].keys()):
+            lines.append(f"#### {sec}\n\n")
+            for rel, syn in data[cat][sec]:
+                base = Path(rel).name
+                syn_tag = " (synopsis)" if syn else ""
+                doc = docs.get(rel)
+                doc_part = f" — [docs]({doc})" if doc else ""
+                lines.append(f"- [{base}]({rel}){doc_part}{syn_tag}\n")
+            lines.append("\n")
         lines.append("\n")
     return "".join(lines)
 
@@ -57,14 +61,14 @@ def discover_scripts() -> List[Path]:
     return sorted({p for p in roots})
 
 
-def section_for(p: Path) -> str:
+def section_for(p: Path) -> Tuple[str, str]:
     parts = p.parts
     # ConnectWise RMM scripts: ConnectWise-RMM-Asio / Scripts / <Platform> / file
     if "Scripts" in parts:
         try:
             idx = parts.index("Scripts")
             if idx + 1 < len(parts):
-                return parts[idx + 1]
+                return "ConnectWise RMM (Asio)", parts[idx + 1]
         except ValueError:
             pass
     # Standalone scripts: Standalone / <Category?> / file
@@ -72,8 +76,8 @@ def section_for(p: Path) -> str:
         try:
             idx = parts.index("Standalone")
             if idx + 1 < len(parts):
-                return parts[idx + 1]
-            return "Standalone"
+                return "Standalone", parts[idx + 1]
+            return "Standalone", "General"
         except ValueError:
             pass
     # ConnectWise PSA scripts: ConnectWise-PSA / <Category?> / file
@@ -81,11 +85,11 @@ def section_for(p: Path) -> str:
         try:
             idx = parts.index("ConnectWise-PSA")
             if idx + 1 < len(parts):
-                return parts[idx + 1]
-            return "ConnectWise-PSA"
+                return "ConnectWise PSA", parts[idx + 1]
+            return "ConnectWise PSA", "General"
         except ValueError:
             pass
-    return "Misc"
+    return "Misc", "Misc"
 
 
 def normalize_name(s: str) -> str:
@@ -141,23 +145,25 @@ def build_doc_lookup() -> Dict[str, str]:
     return mapping
 
 
-def build_catalog_data(paths: List[Path]) -> Dict[str, List[Tuple[str, bool]]]:
-    data: Dict[str, List[Tuple[str, bool]]] = {}
+def build_catalog_data(paths: List[Path]) -> Dict[str, Dict[str, List[Tuple[str, bool]]]]:
+    nested: DefaultDict[str, DefaultDict[str, List[Tuple[str, bool]]]] = defaultdict(lambda: defaultdict(list))
     for p in paths:
         rel = p.relative_to(REPO).as_posix()
         syn = has_synopsis(p)
         print(f"[build_catalog] ITEM path={rel} syn={'YES' if syn else 'NO'}")
         sec = section_for(p)
-        data.setdefault(sec, []).append((rel, syn))
+        category, section = sec
+        nested[category][section].append((rel, syn))
         if p.name.lower().startswith("m365cleanup"):
             print(f"[build_catalog] ITEM-M365 matched for path={rel}")
     # sort entries within each section
-    for sec in list(data.keys()):
-        data[sec].sort(key=lambda t: t[0].lower())
-    return data
+    for cat in list(nested.keys()):
+        for sec in list(nested[cat].keys()):
+            nested[cat][sec].sort(key=lambda t: t[0].lower())
+    return nested  # type: ignore
 
 
-def render_readme(data: Dict[str, List[Tuple[str, bool]]], docs: Dict[str, str]) -> str:
+def render_readme(data: Dict[str, Dict[str, List[Tuple[str, bool]]]], docs: Dict[str, str]) -> str:
     catalog = render_catalog_block(data, docs)
     block = f"{MARKER_START}\n{catalog}{MARKER_END}\n"
 
@@ -197,17 +203,18 @@ def write_readme(new_md: str) -> None:
         print("README.md already up-to-date.")
 
 
-def validate_presence(data: Dict[str, List[Tuple[str, bool]]]) -> None:
+def validate_presence(data: Dict[str, Dict[str, List[Tuple[str, bool]]]]) -> None:
     """Write a marker file if any discovered script base name is absent from README."""
     txt = README.read_text(encoding="utf-8") if README.exists() else ""
     if MARKER_START in txt and MARKER_END in txt:
         txt = txt.split(MARKER_START, 1)[1].split(MARKER_END, 1)[0]
     missing: List[str] = []
-    for _, items in sorted(data.items()):
-        for rel, _syn in items:
-            base = Path(rel).stem
-            if base.lower() not in txt.lower():
-                missing.append(base)
+    for cat in sorted(data.keys()):
+        for sec in sorted(data[cat].keys()):
+            for rel, _syn in data[cat][sec]:
+                base = Path(rel).stem
+                if base.lower() not in txt.lower():
+                    missing.append(base)
     marker = REPO / ".catalog_validation_failed"
     if missing:
         try:
