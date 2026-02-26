@@ -47,6 +47,10 @@ Output columns include:
   - companyRecId: ConnectWise company record ID (numeric)
   - companyId: ConnectWise company identifier (string shown in UI)
   - contactRecId: ConnectWise contact record ID (numeric)
+  - companyPhone: ConnectWise company phone number (string)
+  - companySiteId: ConnectWise site record ID for the contact (numeric)
+  - companySiteName: ConnectWise site name for the contact (string)
+  - mobile: Contact mobile/cell phone (string, derived from communicationItems)
 Examples:
   Export contacts to CSV:
     ./psa-contacts-to-csv.sh
@@ -276,7 +280,7 @@ os.replace(tmp, path)
   company_page=1
   while : ; do
     echo "  -> Fetching companies page ${company_page}..."
-    companies_url="${BASE_URL}/company/companies?fields=id,identifier,name,type,type/name,types,types/name,types/identifier,types/description,address,addressLine1,addressLine2,city,state,zip,country&pageSize=${PAGE_SIZE}&page=${company_page}"
+    companies_url="${BASE_URL}/company/companies?fields=id,identifier,name,phoneNumber,type,type/name,types,types/name,types/identifier,types/description,address,addressLine1,addressLine2,city,state,zip,country&pageSize=${PAGE_SIZE}&page=${company_page}"
 
     companies_resp="$(
       curl -sS \
@@ -301,7 +305,7 @@ except Exception:
       break
     fi
 
-    # Merge this page into COMPANY_MAP_FILE (id -> {name, identifier, types, address})
+    # Merge this page into COMPANY_MAP_FILE (id -> {name, identifier, phoneNumber, types, address})
     printf '%s' "$companies_resp" | "$PYTHON" -c 'import sys, json, os
 path = os.environ.get("COMPANY_MAP_FILE")
 if not path:
@@ -335,6 +339,7 @@ for c in page:
         "id": cid,
         "identifier": c.get("identifier"),
         "name": c.get("name"),
+        "phoneNumber": c.get("phoneNumber"),
         "type": c.get("type"),
         "types": c.get("types"),
         # Some CW payloads use a nested `address` object, others are flat fields.
@@ -449,12 +454,16 @@ fieldnames = [
     "companyState",
     "companyZip",
     "companyCountry",
+    "companyPhone",
+    "companySiteId",
+    "companySiteName",
     "contactRecId",
     "firstName",
     "lastName",
     "contactType",
     "contactInactiveFlag",
     "email",
+    "mobile",
 ]
 
 # Determine if we need to write the header
@@ -489,6 +498,52 @@ def extract_email(communication_items):
         val = ci.get("value")
         if isinstance(val, str) and "@" in val:
             return val
+
+    return None
+
+def extract_mobile(communication_items):
+    if not isinstance(communication_items, list):
+        return None
+
+    # Prefer explicit phone items whose type name suggests mobile/cell
+    preferred_tokens = ("mobile", "cell", "sms")
+    for ci in communication_items:
+        if not isinstance(ci, dict):
+            continue
+        comm_type = str(ci.get("communicationType") or ci.get("type") or "").lower()
+        # Some payloads use communicationType=Phone, plus a nested type/name like "Mobile" or "Cell"
+        type_ref = ci.get("type")
+        type_name = ""
+        if isinstance(type_ref, dict):
+            type_name = str(type_ref.get("name") or type_ref.get("identifier") or type_ref.get("description") or "").lower()
+        elif isinstance(type_ref, str):
+            type_name = type_ref.lower()
+
+        value = ci.get("value") or ci.get("address")
+        if not isinstance(value, str) or not value.strip():
+            continue
+
+        if comm_type == "phone" and any(tok in type_name for tok in preferred_tokens):
+            return value.strip()
+
+    # Fallback: first phone item that is not obviously fax
+    for ci in communication_items:
+        if not isinstance(ci, dict):
+            continue
+        comm_type = str(ci.get("communicationType") or ci.get("type") or "").lower()
+        type_ref = ci.get("type")
+        type_name = ""
+        if isinstance(type_ref, dict):
+            type_name = str(type_ref.get("name") or type_ref.get("identifier") or type_ref.get("description") or "").lower()
+        elif isinstance(type_ref, str):
+            type_name = type_ref.lower()
+
+        value = ci.get("value") or ci.get("address")
+        if not isinstance(value, str) or not value.strip():
+            continue
+
+        if comm_type == "phone" and "fax" not in type_name:
+            return value.strip()
 
     return None
 
@@ -643,6 +698,23 @@ for c in data:
         if isinstance(fetched, dict):
             company_identifier = fetched.get("identifier")
 
+    # Resolve company phone number via payload or prefetched map
+    company_phone = None
+    if isinstance(company, dict):
+        company_phone = company.get("phoneNumber")
+    if (not company_phone) and company_rec_id is not None:
+        fetched = company_map.get(str(company_rec_id))
+        if isinstance(fetched, dict):
+            company_phone = fetched.get("phoneNumber")
+
+    # Site (ConnectWise "Site" on contact) - often represents the company site
+    site_ref = c.get("site")
+    site_id = None
+    site_name = None
+    if isinstance(site_ref, dict):
+        site_id = site_ref.get("id")
+        site_name = site_ref.get("name")
+
     # Defensive: drop inactive contacts if requested (API also filters via conditions)
     inactive_flag = c.get("inactiveFlag")
     if exclude_inactive and inactive_flag is True:
@@ -673,12 +745,16 @@ for c in data:
         "companyState": state,
         "companyZip": zipc,
         "companyCountry": country,
+        "companyPhone": company_phone,
+        "companySiteId": site_id,
+        "companySiteName": site_name,
         "contactRecId": c.get("id"),
         "firstName": c.get("firstName"),
         "lastName": c.get("lastName"),
         "contactType": contact_type_label,
         "contactInactiveFlag": inactive_flag,
         "email": extract_email(c.get("communicationItems")),
+        "mobile": extract_mobile(c.get("communicationItems")),
     })
 
 with open(out_path, "a", newline="") as f:
@@ -704,7 +780,7 @@ while [ "$page" -le "$MAX_PAGES" ]; do
   # - communicationItems (for email)
   # - type/types (for contactType)
   # - inactiveFlag (for contactInactiveFlag)
-  url="${BASE_URL}/company/contacts?fields=id,firstName,lastName,company/id,company/identifier,company/name,company/type,company/type/name,company/types,company/types/name,company/types/identifier,company/types/description,company/address,communicationItems,type,type/name,types,types/name,types/identifier,types/description,inactiveFlag&orderBy=company/name&pageSize=${PAGE_SIZE}&page=${page}"
+  url="${BASE_URL}/company/contacts?fields=id,firstName,lastName,company/id,company/identifier,company/name,company/type,company/type/name,company/types,company/types/name,company/types/identifier,company/types/description,company/address,communicationItems/id,communicationItems/communicationType,communicationItems/value,communicationItems/extension,communicationItems/type,communicationItems/type/name,type,type/name,types,types/name,types/identifier,types/description,site/id,site/name,inactiveFlag&orderBy=company/name&pageSize=${PAGE_SIZE}&page=${page}"
 
   # Apply exclusions via conditions
   conditions=""
