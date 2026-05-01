@@ -133,25 +133,35 @@ function Resolve-ZacInstallerUrl {
         throw "Failed to read installer listing at $Uri. Error: $($_.Exception.Message)"
     }
 
-    $links = @()
+    $links = New-Object System.Collections.Generic.List[string]
 
     if ($response.Links) {
-        $links += $response.Links | ForEach-Object { $_.href }
+        foreach ($link in $response.Links) {
+            if ($link.href) {
+                [void]$links.Add([string]$link.href)
+            }
+        }
     }
 
     # Fallback for basic directory listings where Links parsing is unavailable or incomplete.
-    $links += [regex]::Matches($response.Content, 'href=["'']([^"'']+)["'']') | ForEach-Object { $_.Groups[1].Value }
+    foreach ($match in [regex]::Matches($response.Content, 'href=["'']([^"'']+)["'']')) {
+        if ($match.Groups[1].Value) {
+            [void]$links.Add([string]$match.Groups[1].Value)
+        }
+    }
 
     $installerCandidates = $links |
+        Select-Object -Unique |
         Where-Object { $_ -match '(?i)^ZAC_x64-(\d+(?:\.\d+){1,4})\.exe$' } |
         ForEach-Object {
-            $fileName = [System.IO.Path]::GetFileName($_)
+            $href = [string]$_
+            $fileName = [System.IO.Path]::GetFileName($href)
             $versionText = [regex]::Match($fileName, '(\d+(?:\.\d+){1,4})').Value
 
             [pscustomobject]@{
                 FileName = $fileName
                 Version  = [version]$versionText
-                Href     = $_
+                Href     = $href
             }
         } |
         Sort-Object -Property Version -Descending
@@ -162,8 +172,8 @@ function Resolve-ZacInstallerUrl {
         throw "No ZAC_x64-*.exe installers were found at $Uri"
     }
 
-    $baseUri = [System.Uri]$Uri
-    $resolvedUri = [System.Uri]::new($baseUri, $latest.Href).AbsoluteUri
+    $baseUri = New-Object System.Uri($Uri)
+    $resolvedUri = (New-Object System.Uri($baseUri, [string]$latest.Href)).AbsoluteUri
 
     Write-Status "Latest ZAC installer resolved: $($latest.FileName) / version $($latest.Version)"
     return $resolvedUri
