@@ -1,31 +1,3 @@
-<#
-.SYNOPSIS
-    Downloads and installs Zultys Advanced Communicator (ZAC) Desktop, then creates a public desktop shortcut with the MX server URL.
-
-.DESCRIPTION
-    Designed for on-demand execution from ConnectWise RMM / Asio as SYSTEM.
-    The script downloads the ZAC installer, installs it silently, writes an installer log when supported, locates the installed ZAC executable,
-    and creates/updates a shortcut on the Public Desktop that launches ZAC with the specified MX server URL.
-
-.PARAMETER InstallerUrl
-    Direct download URL for the ZAC Desktop installer, or the Zultys mirror folder URL.
-    If a mirror folder URL is supplied, the script downloads the latest ZAC_x64-*.exe found in the listing.
-
-.PARAMETER MxServer
-    MX server FQDN or URL to pass to ZAC using the u= shortcut argument.
-    In ConnectWise RMM, this should be provided via the token @mx_server_url@.
-    Example: server.mxvirtual.com
-
-.PARAMETER ShortcutName
-    Name of the shortcut to create on the Public Desktop.
-
-.EXAMPLE
-    .\zultysZacDesktopInstall.ps1 -InstallerUrl "https://mirror.zultys.biz/ZAC/" -MxServer "server.mxvirtual.com"
-
-.NOTES
-    ZAC shortcut server argument format: u=<MX server>
-#>
-
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
@@ -74,7 +46,8 @@ function Write-Status {
         [string]$Message
     )
 
-    Write-Output "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message"
+    # Use Write-Host so status messages do not pollute function return values.
+    Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message"
 }
 
 function Get-ZacExecutablePath {
@@ -302,6 +275,9 @@ try {
     }
 
     $ResolvedInstallerUrl = Resolve-ZacInstallerUrl -Uri $InstallerUrl
+    $ResolvedInstallerUrl = [string]$ResolvedInstallerUrl
+    Write-Status "Resolved installer URL: $ResolvedInstallerUrl"
+
     $InstallerExtension = [System.IO.Path]::GetExtension(([string]$ResolvedInstallerUrl).Split('?')[0])
     if ([string]::IsNullOrWhiteSpace($InstallerExtension)) {
         throw "Unable to determine installer file extension from resolved URL: $ResolvedInstallerUrl"
