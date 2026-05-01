@@ -1,3 +1,12 @@
+<#
+.SYNOPSIS
+  Installs Zultys ZAC Desktop and creates a configured public desktop shortcut.
+.DESCRIPTION
+  Resolves the latest ZAC x64 installer from the configured source, installs it
+  silently, validates the MX server parameter, and creates a shortcut that passes
+  the server value to ZAC.
+#>
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
@@ -10,7 +19,7 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidateNotNullOrEmpty()]
-    [string]$ShortcutName = "Zultys ZAC"
+    [string]$ShortcutName = "ZAC"
 )
 
 
@@ -285,25 +294,52 @@ try {
         New-Item -Path $WorkDir -ItemType Directory -Force | Out-Null
     }
 
-    $ResolvedInstallerUrl = Resolve-ZacInstallerUrl -Uri $InstallerUrl
-    $ResolvedInstallerUrl = [string]$ResolvedInstallerUrl
-    Write-Status "Resolved installer URL: $ResolvedInstallerUrl"
-
-    $InstallerExtension = [System.IO.Path]::GetExtension(([string]$ResolvedInstallerUrl).Split('?')[0])
-    if ([string]::IsNullOrWhiteSpace($InstallerExtension)) {
-        throw "Unable to determine installer file extension from resolved URL: $ResolvedInstallerUrl"
-    }
-    $InstallerPath = Join-Path $WorkDir "ZultysZAC$InstallerExtension"
-
-    Invoke-FileDownload -Uri $ResolvedInstallerUrl -Destination $InstallerPath
-    Install-ZacInstaller -Path $InstallerPath -LogPath $InstallLogPath
-
     $zacExePath = Get-ZacExecutablePath
-    if (-not $zacExePath) {
-        throw "ZAC executable was not found after installation. Review installer output and log if available: $InstallLogPath"
+
+    if ($zacExePath) {
+        Write-Status "ZAC is already installed. Skipping download and install."
+    }
+    else {
+        Write-Status "ZAC is not installed. Proceeding with download and install."
+
+        $ResolvedInstallerUrl = Resolve-ZacInstallerUrl -Uri $InstallerUrl
+        $ResolvedInstallerUrl = [string]$ResolvedInstallerUrl
+        Write-Status "Resolved installer URL: $ResolvedInstallerUrl"
+
+        $InstallerExtension = [System.IO.Path]::GetExtension(([string]$ResolvedInstallerUrl).Split('?')[0])
+        if ([string]::IsNullOrWhiteSpace($InstallerExtension)) {
+            throw "Unable to determine installer file extension from resolved URL: $ResolvedInstallerUrl"
+        }
+        $InstallerPath = Join-Path $WorkDir "ZultysZAC$InstallerExtension"
+
+        Invoke-FileDownload -Uri $ResolvedInstallerUrl -Destination $InstallerPath
+        Install-ZacInstaller -Path $InstallerPath -LogPath $InstallLogPath
+
+        $zacExePath = Get-ZacExecutablePath
+        if (-not $zacExePath) {
+            throw "ZAC executable was not found after installation. Review installer output and log if available: $InstallLogPath"
+        }
     }
 
     Write-Status "Found ZAC executable: $zacExePath"
+
+    $publicDesktopPath = Join-Path $env:PUBLIC "Desktop"
+    $installerShortcutPath = Join-Path $publicDesktopPath "ZAC.lnk"
+    $previousScriptShortcutPath = Join-Path $publicDesktopPath "Zultys ZAC.lnk"
+
+    if (Test-Path -LiteralPath $installerShortcutPath) {
+        $ShortcutPath = $installerShortcutPath
+        Write-Status "Existing installer-created ZAC shortcut found. Updating it instead of creating a duplicate."
+
+        if (Test-Path -LiteralPath $previousScriptShortcutPath) {
+            Remove-Item -LiteralPath $previousScriptShortcutPath -Force -ErrorAction SilentlyContinue
+            Write-Status "Removed previous duplicate shortcut: $previousScriptShortcutPath"
+        }
+    }
+    else {
+        $ShortcutPath = Join-Path $publicDesktopPath "$ShortcutName.lnk"
+        Write-Status "Installer-created ZAC shortcut was not found. Creating shortcut: $ShortcutPath"
+    }
 
     New-ZacShortcut -TargetPath $zacExePath -Server $MxServer -Path $ShortcutPath
 

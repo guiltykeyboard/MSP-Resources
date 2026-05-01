@@ -1,5 +1,10 @@
-# This script adds an Entra ID (AzureAD) user to a specified local security group.
-# If the group does not exist, it will create the group before adding the user.
+<#
+.SYNOPSIS
+  Adds an Entra ID user to a local security group.
+.DESCRIPTION
+  Creates the specified local group when needed, then adds the provided
+  AzureAD\user@domain member if it is not already present.
+#>
 
 param ()
 
