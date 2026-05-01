@@ -121,6 +121,32 @@ C:\ProgramData\iTech\ZultysZAC\ZultysZAC_Install.log
 
 ---
 
+---
+
+## CW RMM One-Liner Usage (Script Steps)
+
+You can execute this script directly from GitHub using a two-step script in ConnectWise RMM.
+
+### Step 1 – PowerShell Script
+
+```powershell
+$u="https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main/ConnectWise-RMM-Asio/Scripts/Windows/zultysZacDesktopInstall.ps1"; iwr $u -UseBasicParsing | iex -MxServer "@mx_server_url@"
+```
+
+### Step 2 – Script Log
+
+```text
+%output%
+```
+
+This approach allows you to:
+
+- Avoid uploading the script into RMM
+- Always pull the latest version from your repository
+- Pass the MX server dynamically using the RMM parameter
+
+---
+
 ## Output
 
 The script returns:
