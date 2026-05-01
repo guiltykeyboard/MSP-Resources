@@ -171,12 +171,23 @@ function Invoke-FileDownload {
 
     Write-Status "Downloading ZAC installer from $Uri"
 
+    if (Test-Path -LiteralPath $Destination) {
+        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+    }
+
     try {
-        Invoke-WebRequest -Uri $Uri -OutFile $Destination -UseBasicParsing
+        Write-Status "Using BITS download first for better RMM reliability."
+        Start-BitsTransfer -Source $Uri -Destination $Destination -ErrorAction Stop
     }
     catch {
-        Write-Status "Invoke-WebRequest failed. Attempting BITS download. Error: $($_.Exception.Message)"
-        Start-BitsTransfer -Source $Uri -Destination $Destination
+        Write-Status "BITS download failed. Attempting short-timeout Invoke-WebRequest fallback. Error: $($_.Exception.Message)"
+
+        try {
+            Invoke-WebRequest -Uri $Uri -OutFile $Destination -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
+        }
+        catch {
+            throw "Installer download failed using both BITS and Invoke-WebRequest. Error: $($_.Exception.Message)"
+        }
     }
 
     if (-not (Test-Path -LiteralPath $Destination)) {
