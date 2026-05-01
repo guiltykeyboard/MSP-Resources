@@ -130,7 +130,7 @@ You can execute this script directly from GitHub using a two-step script in Conn
 ### Step 1 – PowerShell Script
 
 ```powershell
-$u="https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main/ConnectWise-RMM-Asio/Scripts/Windows/zultysZacDesktopInstall.ps1"; iwr $u -UseBasicParsing | iex -MxServer "@mx_server_url@"
+$u="https://raw.githubusercontent.com/guiltykeyboard/MSP-Resources/main/ConnectWise-RMM-Asio/Scripts/Windows/zultysZacDesktopInstall.ps1"; & ([scriptblock]::Create((iwr $u -UseBasicParsing).Content)) -MxServer "@mx_server_url@"
 ```
 
 ### Step 2 – Script Log

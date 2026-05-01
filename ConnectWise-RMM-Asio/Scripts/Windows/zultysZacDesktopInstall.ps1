@@ -278,7 +278,7 @@ try {
     }
     $InstallerPath = Join-Path $WorkDir "ZultysZAC$InstallerExtension"
 
-    Download-File -Uri $ResolvedInstallerUrl -Destination $InstallerPath
+    Invoke-FileDownload -Uri $ResolvedInstallerUrl -Destination $InstallerPath
     Install-ZacInstaller -Path $InstallerPath -LogPath $InstallLogPath
 
     $zacExePath = Get-ZacExecutablePath
