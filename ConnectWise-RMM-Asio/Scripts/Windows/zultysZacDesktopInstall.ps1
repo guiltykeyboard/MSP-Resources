@@ -62,7 +62,7 @@ if ($MxServer -notmatch '^[a-zA-Z0-9.-]+$') {
 
 $ErrorActionPreference = "Stop"
 
-$WorkDir = Join-Path $env:ProgramData "Zultys\ZAC"
+$WorkDir = Join-Path $env:TEMP "ZultysZAC"
 $ResolvedInstallerUrl = $null
 $InstallerPath = $null
 $InstallLogPath = Join-Path $WorkDir "ZultysZAC_Install.log"
