@@ -55,8 +55,8 @@ param(
   [switch]$SelfUpdated  # internal guard to avoid update loops
 )
 
-# Baked commit fallback (replaced by CI); leave placeholder literally as c1c6da2aa0f768f6f69c2d42112bf440291b8262
-$Script:GIT_COMMIT = 'c1c6da2aa0f768f6f69c2d42112bf440291b8262'
+# Baked commit fallback (replaced by CI); leave placeholder literally as 5f2777c96d5db899d4dc54fac1689688d592bd24
+$Script:GIT_COMMIT = '5f2777c96d5db899d4dc54fac1689688d592bd24'
 
 # --- Metadata / Source Info --------------------------------------------------
 try {
@@ -69,7 +69,7 @@ try {
   if (Test-Path (Join-Path $gitRoot '.git')) {
     $commitHash = (git -C $gitRoot rev-parse --short HEAD 2>$null)
   }
-  if (-not $commitHash -and $Script:GIT_COMMIT -and $Script:GIT_COMMIT -ne 'c1c6da2aa0f768f6f69c2d42112bf440291b8262') {
+  if (-not $commitHash -and $Script:GIT_COMMIT -and $Script:GIT_COMMIT -ne '5f2777c96d5db899d4dc54fac1689688d592bd24') {
     $commitHash = $Script:GIT_COMMIT
   }
   $msg = "SCRIPT SOURCE: $scriptPath"
