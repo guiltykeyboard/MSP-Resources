@@ -41,9 +41,21 @@ param(
     [string]$ShortcutName = "Zultys ZAC"
 )
 
+
 # Validate MX server parameter (RMM token replacement check)
 if ([string]::IsNullOrWhiteSpace($MxServer) -or $MxServer -eq "@mx_server_url@") {
     Write-Output "ERROR: MX server URL was not provided. Ensure the RMM parameter @mx_server_url@ is set."
+    Write-Output "NONCOMPLIANT"
+    exit 1
+}
+
+# Normalize MX server input (strip protocol and trailing slash)
+$MxServer = $MxServer -replace '^https?://', ''
+$MxServer = $MxServer.TrimEnd('/')
+
+# Basic validation to ensure it still looks like a hostname
+if ($MxServer -notmatch '^[a-zA-Z0-9.-]+$') {
+    Write-Output "ERROR: MX server value '$MxServer' is not a valid hostname."
     Write-Output "NONCOMPLIANT"
     exit 1
 }
