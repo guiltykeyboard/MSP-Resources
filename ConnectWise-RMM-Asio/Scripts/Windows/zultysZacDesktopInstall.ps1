@@ -114,6 +114,8 @@ function Resolve-ZacInstallerUrl {
         [string]$Uri
     )
 
+    $Uri = [string]$Uri
+    $Uri = $Uri.Trim()
     # Direct installer file provided
     if ($Uri -match "(?i)\.(exe|msi)$") {
         return $Uri
@@ -172,8 +174,9 @@ function Resolve-ZacInstallerUrl {
         throw "No ZAC_x64-*.exe installers were found at $Uri"
     }
 
-    $baseUri = New-Object System.Uri($Uri)
-    $resolvedUri = (New-Object System.Uri($baseUri, [string]$latest.Href)).AbsoluteUri
+    $baseUri = New-Object -TypeName System.Uri -ArgumentList @($Uri)
+    $resolvedUriObject = New-Object -TypeName System.Uri -ArgumentList @($baseUri, [string]$latest.Href)
+    $resolvedUri = $resolvedUriObject.AbsoluteUri
 
     Write-Status "Latest ZAC installer resolved: $($latest.FileName) / version $($latest.Version)"
     return $resolvedUri
@@ -294,7 +297,8 @@ try {
     }
 
     $ResolvedInstallerUrl = Resolve-ZacInstallerUrl -Uri $InstallerUrl
-    $InstallerExtension = [System.IO.Path]::GetExtension(([System.Uri]$ResolvedInstallerUrl).AbsolutePath)
+    $resolvedInstallerUriObject = New-Object -TypeName System.Uri -ArgumentList @([string]$ResolvedInstallerUrl)
+    $InstallerExtension = [System.IO.Path]::GetExtension($resolvedInstallerUriObject.AbsolutePath)
     if ([string]::IsNullOrWhiteSpace($InstallerExtension)) {
         throw "Unable to determine installer file extension from resolved URL: $ResolvedInstallerUrl"
     }
