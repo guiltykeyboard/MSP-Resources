@@ -1,4 +1,4 @@
-[build_catalog] Discovered 14 scripts (pre-write)
+[build_catalog] Discovered 15 scripts (pre-write)
 [build_catalog] ITEM path=ConnectWise-PSA/psa-contact-email-automation/psa-contacts-to-csv.sh syn=YES
 [build_catalog] ITEM path=ConnectWise-RMM-Asio/Scripts/Windows/M365Cleanup.ps1 syn=YES
 [build_catalog] ITEM-M365 matched for path=ConnectWise-RMM-Asio/Scripts/Windows/M365Cleanup.ps1
@@ -10,11 +10,12 @@
 [build_catalog] ITEM path=ConnectWise-RMM-Asio/Scripts/Windows/deployCoveBackupSoftware.ps1 syn=YES
 [build_catalog] ITEM path=ConnectWise-RMM-Asio/Scripts/Windows/enableBitlocker.ps1 syn=YES
 [build_catalog] ITEM path=ConnectWise-RMM-Asio/Scripts/Windows/modify-sleep-settings.ps1 syn=YES
+[build_catalog] ITEM path=ConnectWise-RMM-Asio/Scripts/Windows/rmm-check-bitlocker-wrapper.ps1 syn=YES
 [build_catalog] ITEM path=ConnectWise-RMM-Asio/Scripts/Windows/zultysZacDesktopInstall.ps1 syn=YES
 [build_catalog] ITEM path=Standalone/test-snmp.ps1 syn=YES
 [build_catalog] ITEM path=Standalone/test-snmp.sh syn=YES
 [build_catalog] ITEM path=Standalone/unifiOSssl.sh syn=YES
-[build_catalog] Matched docs for 14 scripts
+[build_catalog] Matched docs for 15 scripts
 Updated README.md with grouped catalog.
-[build_catalog] Discovered 14 scripts
+[build_catalog] Discovered 15 scripts
 [build_catalog] VALIDATION: all discovered scripts present in README.
