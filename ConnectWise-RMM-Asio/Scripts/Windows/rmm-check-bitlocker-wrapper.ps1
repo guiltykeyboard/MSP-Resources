@@ -9,6 +9,11 @@
     child process so its exit code cannot escape into this script, and prints a
     single line to stdout on success.
 
+    Leaves nothing behind. The payload and its stderr are written to %TEMP% under
+    a GUID name and removed in a finally block, and no cache file is written at
+    all unless the caller asks for one with -ShaCacheMinutes. When caching is
+    off, a stale entry left by an earlier version is removed on the next run.
+
     When there is no verdict it prints no digit at all. Instead it writes BL_*
     lines, which the RMM step output carries into the script log:
 
@@ -33,10 +38,9 @@
     Why the SHA: fetching /main/ can be served stale by the GitHub CDN, and
     fetching by branch with a cache-buster is the problem the old self-updater
     was invented to patch. Content at a commit SHA is immutable, so a stale copy
-    is structurally impossible. The resolved SHA is cached per repository so a
-    fleet behind one egress IP does not exhaust GitHub's unauthenticated API
-    limit; when resolution fails the wrapper falls back to the branch name and
-    BL_REF shows that it did.
+    is structurally impossible. When the SHA cannot be resolved - no network, or
+    the unauthenticated API rate limit - the wrapper falls back to the branch
+    with a cache-busting query string, and BL_REF shows that it did.
 
     Why -SelfUpdated on the child: it suppresses the legacy self-updater in the
     v1 payload, so this wrapper is safe to deploy BEFORE the new payload lands.
@@ -48,7 +52,10 @@
     Path to the payload inside the repository.
 
 .PARAMETER ShaCacheMinutes
-    How long a resolved commit SHA may be reused on this host. 0 disables cache.
+    How long a resolved commit SHA may be reused on this host. Default 0, which
+    writes no file at all - every run resolves the branch tip with one API call.
+    Set it above 0 only on a fleet large enough to exhaust GitHub's 60 requests
+    per hour per IP limit; the cache then lives in ProgramData and persists.
 
 .PARAMETER TimeoutSec
     Timeout for the metadata call and the payload download.
@@ -61,7 +68,7 @@
     Exit codes:
       0  verdict emitted on stdout
       1  no verdict - the BL_ lines say why
-    Version: 2.2.0
+    Version: 2.3.0
 
     Reasons raised here:
       DOWNLOAD_HTTP_404       path or ref not found at the remote
@@ -83,7 +90,7 @@
 param(
     [string]$Repo = 'guiltykeyboard/MSP-Resources',
     [string]$RelPath = 'ConnectWise-RMM-Asio/Scripts/Windows/checkIfBitlockerEnabled.ps1',
-    [int]$ShaCacheMinutes = 15,
+    [int]$ShaCacheMinutes = 0,
     [int]$TimeoutSec = 30
 )
 
@@ -167,13 +174,13 @@ function Get-DownloadReason {
 
 function Resolve-CommitRef {
     <#
-        Resolve the branch tip to a commit SHA, caching it locally for a short
-        while. Returns $null when it cannot be resolved; the caller then falls
-        back to the branch name and the log shows that.
+        Resolve the branch tip to a commit SHA. Returns $null when it cannot be
+        resolved; the caller then falls back to the branch name with a
+        cache-busting query, and the log shows that it did.
 
-        The cache entry is keyed on the repository: two repositories on one
-        endpoint would otherwise reuse each other's SHA inside the window, and
-        the second download would 404 against a commit that does not exist there.
+        Nothing is written to disk unless $CacheMinutes is above 0. With caching
+        off - the default - an entry left behind by an earlier version is removed
+        rather than ignored, so an upgraded host does not keep the file forever.
     #>
     param(
         [Parameter(Mandatory)][string]$Repo,
@@ -185,10 +192,15 @@ function Resolve-CommitRef {
     $cacheFile = Join-Path $cacheDir ('bitlocker-check-ref_{0}.txt' -f $cacheKey)
     $now       = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
-    if ($CacheMinutes -gt 0 -and (Test-Path -LiteralPath $cacheFile)) {
+    if ($CacheMinutes -le 0) {
+        if (Test-Path -LiteralPath $cacheFile) {
+            Remove-Item -LiteralPath $cacheFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+    elseif (Test-Path -LiteralPath $cacheFile) {
         try {
             $parts = (Get-Content -LiteralPath $cacheFile -Raw -ErrorAction Stop).Trim() -split '\|'
-            if ($parts.Count -eq 2 -and $parts[1].Trim().Length -ge 7) {
+            if ($parts.Count -ge 2 -and $parts[1].Trim() -match '^[0-9a-fA-F]{40}$') {
                 $stamp = [long]0
                 if ([long]::TryParse($parts[0], [ref]$stamp) -and ($now - $stamp) -lt ($CacheMinutes * 60)) {
                     return $parts[1].Trim()
@@ -203,14 +215,16 @@ function Resolve-CommitRef {
         $sha = (Invoke-RestMethod -UseBasicParsing -TimeoutSec $TimeoutSec -Uri $uri `
                     -Headers @{ 'User-Agent' = 'CW-RMM' }).sha
 
-        if ($sha -and $sha.Length -ge 7) {
-            try {
-                if (-not (Test-Path -LiteralPath $cacheDir)) {
-                    New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+        if ($sha -and $sha.Length -eq 40) {
+            if ($CacheMinutes -gt 0) {
+                try {
+                    if (-not (Test-Path -LiteralPath $cacheDir)) {
+                        New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+                    }
+                    Set-Content -LiteralPath $cacheFile -Value ('{0}|{1}|{2}' -f $now, $sha, $Repo) -Encoding ASCII -ErrorAction Stop
                 }
-                Set-Content -LiteralPath $cacheFile -Value ('{0}|{1}|{2}' -f $now, $sha, $Repo) -Encoding ASCII -ErrorAction Stop
+                catch { }
             }
-            catch { }
             return $sha
         }
     }
@@ -220,9 +234,16 @@ function Resolve-CommitRef {
 }
 
 $ref = Resolve-CommitRef -Repo $Repo -CacheMinutes $ShaCacheMinutes
-if (-not $ref) { $ref = 'main' }
 
-$url     = 'https://raw.githubusercontent.com/{0}/{1}/{2}' -f $Repo, $ref, $RelPath
+if ($ref) {
+    $url = 'https://raw.githubusercontent.com/{0}/{1}/{2}' -f $Repo, $ref, $RelPath
+}
+else {
+    # No SHA: fetch the branch, but bust the CDN so a stale blob cannot be served.
+    $ref = 'main'
+    $url = 'https://raw.githubusercontent.com/{0}/{1}/{2}?cb={3}' -f $Repo, $ref, $RelPath, [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+}
+
 $tmp     = Join-Path $env:TEMP ('chkbl_{0}.ps1' -f ([guid]::NewGuid().ToString('N')))
 $errFile = Join-Path $env:TEMP ('chkbl_{0}.err' -f ([guid]::NewGuid().ToString('N')))
 
