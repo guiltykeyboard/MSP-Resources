@@ -9,10 +9,9 @@
     child process so its exit code cannot escape into this script, and prints a
     single line to stdout on success.
 
-    Leaves nothing behind. The payload and its stderr are written to %TEMP% under
+    Leave nothing behind: the payload and its stderr are written to %TEMP% under
     a GUID name and removed in a finally block, and no cache file is written at
-    all unless the caller asks for one with -ShaCacheMinutes. When caching is
-    off, a stale entry left by an earlier version is removed on the next run.
+    all unless the caller explicitly asks for one with -ShaCacheMinutes.
 
     When there is no verdict it prints no digit at all. Instead it writes BL_*
     lines, which the RMM step output carries into the script log:
@@ -68,7 +67,7 @@
     Exit codes:
       0  verdict emitted on stdout
       1  no verdict - the BL_ lines say why
-    Version: 2.3.0
+    Version: 2.3.1
 
     Reasons raised here:
       DOWNLOAD_HTTP_404       path or ref not found at the remote
@@ -178,9 +177,10 @@ function Resolve-CommitRef {
         resolved; the caller then falls back to the branch name with a
         cache-busting query, and the log shows that it did.
 
-        Nothing is written to disk unless $CacheMinutes is above 0. With caching
-        off - the default - an entry left behind by an earlier version is removed
-        rather than ignored, so an upgraded host does not keep the file forever.
+        Nothing is written to disk unless $CacheMinutes is above 0, which is the
+        default. The reader accepts only the three-field entry this function
+        writes, for the same repository, so a malformed or foreign file is
+        ignored rather than trusted.
     #>
     param(
         [Parameter(Mandatory)][string]$Repo,
@@ -192,15 +192,10 @@ function Resolve-CommitRef {
     $cacheFile = Join-Path $cacheDir ('bitlocker-check-ref_{0}.txt' -f $cacheKey)
     $now       = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
-    if ($CacheMinutes -le 0) {
-        if (Test-Path -LiteralPath $cacheFile) {
-            Remove-Item -LiteralPath $cacheFile -Force -ErrorAction SilentlyContinue
-        }
-    }
-    elseif (Test-Path -LiteralPath $cacheFile) {
+    if ($CacheMinutes -gt 0 -and (Test-Path -LiteralPath $cacheFile)) {
         try {
             $parts = (Get-Content -LiteralPath $cacheFile -Raw -ErrorAction Stop).Trim() -split '\|'
-            if ($parts.Count -ge 2 -and $parts[1].Trim() -match '^[0-9a-fA-F]{40}$') {
+            if ($parts.Count -eq 3 -and $parts[2].Trim() -eq $Repo -and $parts[1].Trim() -match '^[0-9a-fA-F]{40}$') {
                 $stamp = [long]0
                 if ([long]::TryParse($parts[0], [ref]$stamp) -and ($now - $stamp) -lt ($CacheMinutes * 60)) {
                     return $parts[1].Trim()
