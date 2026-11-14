@@ -1,226 +1,204 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Return 1 if any **non‑removable** (fixed) drives have BitLocker enabled; otherwise 0.
+    Prints exactly one line - 1 or 0 - for whether BitLocker protection is On
+    for any fixed (non-removable) drive.
+
 .DESCRIPTION
-  Built for CW RMM (ConnectWise RMM - Asio) to run on a schedule (e.g., weekly) and feed a
-  Yes/No custom field. The script inspects **fixed/local** drives only (excludes removable
-  USB flash drives, optical, network, RAM disks) and checks BitLocker status per volume.
+    Read-only. Emits '1' or '0' on stdout and nothing else, so the caller's
+    single-line match is unambiguous. When the state cannot be determined it
+    prints NOTHING on stdout, writes a machine-readable reason to stderr, and
+    exits non-zero - so no caller can record a guess as an answer, and the
+    reason for the silence survives into the RMM script log.
 
-  Output is a **single line**: `1` if any fixed drive has BitLocker protection **On**,
-  else `0`. Use this in CW RMM automation to set a boolean/flag custom field.
+    No network access. No self-update. No files written. No elevation.
 
-  Implementation details:
-  - Prefers `Get-BitLockerVolume` when available.
-  - Falls back to `manage-bde -status` for older hosts.
-  - Runs fine as SYSTEM (no local files created). In mixed scenarios, it can self‑elevate
-    when not already elevated unless `-NoElevate` is supplied.
+    The previous version of this script carried a self-updater that compared a
+    40-character baked commit constant against a 7-character short SHA, so it
+    concluded "outdated" on every run, re-launched itself from %TEMP, and
+    exited before printing the 0/1 line. That path is gone: pin the fetch to a
+    commit SHA instead (see rmm-check-bitlocker-wrapper.ps1) and the content can
+    never be stale, because content at a SHA is immutable.
 
 .PARAMETER NoElevate
-  Skip self‑elevation if not already elevated.
+    Accepted for backward compatibility. This script never self-elevates; run
+    it as SYSTEM (RMM agents already do).
+
+.PARAMETER SelfUpdated
+    Accepted for backward compatibility. Unused.
 
 .OUTPUTS
-  System.String — "1" or "0" on STDOUT for easy parsing by CW RMM.
+    System.String - '1' or '0' on stdout, one line.
 
-.EXAMPLE
-  powershell.exe -ExecutionPolicy Bypass -File .\checkIfBitlockerEnabled.ps1
-  # 1  (means at least one fixed drive has BitLocker enabled)
+.NOTES
+    Exit codes:
+      0  verdict emitted
+      2  could not determine - a BL_REASON= line on stderr says why
+      1  unexpected error
+
+    stderr reasons:
+      NO_BITLOCKER_CMDLETS   neither Get-BitLockerVolume nor manage-bde exists
+      NO_DRIVES              no fixed drives enumerated
+      SYSTEM_VOLUME_UNKNOWN  the system volume's state could not be read
+      ALL_DRIVES_UNKNOWN     no fixed drive yielded a readable state
+      UNEXPECTED             an exception escaped; detail carries the message
+    Version: 2.1.1
 #>
-
-
+[CmdletBinding()]
 param(
-  [switch]$NoElevate,
-  [switch]$SelfUpdated  # internal guard to avoid update loops
+    [switch]$NoElevate,
+    [switch]$SelfUpdated
 )
 
-# Baked commit fallback (replaced by CI); leave placeholder literally as e154d1a4db9fcb6ed2581496d0b15f7f0469012a
-$Script:GIT_COMMIT = 'e154d1a4db9fcb6ed2581496d0b15f7f0469012a'
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
-# --- Metadata / Source Info --------------------------------------------------
-try {
-  $scriptPath = $PSCommandPath
-  $commitHash = ''
-  $gitRoot = (Get-Item $scriptPath).Directory.FullName
-  while (-not (Test-Path (Join-Path $gitRoot '.git')) -and (Split-Path $gitRoot) -ne $gitRoot) {
-    $gitRoot = Split-Path $gitRoot
-  }
-  if (Test-Path (Join-Path $gitRoot '.git')) {
-    $commitHash = (git -C $gitRoot rev-parse --short HEAD 2>$null)
-  }
-  if (-not $commitHash -and $Script:GIT_COMMIT -and $Script:GIT_COMMIT -ne 'e154d1a4db9fcb6ed2581496d0b15f7f0469012a') {
-    $commitHash = $Script:GIT_COMMIT
-  }
-  $msg = "SCRIPT SOURCE: $scriptPath"
-  if ($commitHash) { $msg += " (Git commit: $commitHash)" }
-  Write-Output $msg
-} catch {
-  Write-Output "SCRIPT SOURCE: $PSCommandPath (Git info unavailable)"
-}
+function Write-Reason {
+    <#
+        Machine-readable reason on stderr, never on stdout. stdout carries the
+        verdict and nothing else; the caller relays these lines to the log.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Reason,
+        [string]$Detail
+    )
 
-# Self-update helpers
-function Get-RepoLatestShortSHA {
-  param([string]$Repo = 'guiltykeyboard/MSP-Resources', [string]$Ref = 'main')
-  try {
-    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
-    $uri = "https://api.github.com/repos/$Repo/commits/$Ref"
-    $resp = Invoke-WebRequest -Uri $uri -UseBasicParsing -Headers @{ 'User-Agent'='MSP-Resources-SelfUpdate' } -ErrorAction Stop
-    $json = $resp.Content | ConvertFrom-Json
-    $sha = $json.sha
-    if ($sha -and $sha.Length -ge 7) { return $sha.Substring(0,7) }
-  } catch { }
-  return $null
-}
-function Invoke-SelfUpdateIfOutdated {
-  param(
-    [Parameter(Mandatory)][string]$RepoRelPath,
-    [string]$Repo = 'guiltykeyboard/MSP-Resources',
-    [string]$Ref = 'main',
-    [switch]$Skip
-  )
-  if ($Skip) { return }
-  $latest = Get-RepoLatestShortSHA -Repo $Repo -Ref $Ref
-  if (-not $latest) { return }
-  $current = $commitHash
-  if (-not $current) { $current = $Script:GIT_COMMIT }
-  if ($current -and $latest -eq $current) { return }
-  try {
-    $rawBase = "https://raw.githubusercontent.com/$Repo/$Ref"
-    $url = "$rawBase/$RepoRelPath"
-    $tmp = Join-Path $env:TEMP ("{0}-{1}.ps1" -f ([IO.Path]::GetFileNameWithoutExtension($RepoRelPath)), $latest)
-    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tmp -ErrorAction Stop
-
-    # Integrity verification using GitHub API SHA
-    try {
-      $shaApi = "https://api.github.com/repos/$Repo/contents/$RepoRelPath?ref=$Ref"
-      $shaResp = Invoke-WebRequest -UseBasicParsing -Uri $shaApi -Headers @{ 'User-Agent'='MSP-Resources-SelfUpdate' } -ErrorAction Stop
-      $shaJson = $shaResp.Content | ConvertFrom-Json
-      $expectedSha = $shaJson.sha
-      if ($expectedSha) {
-        $actualSha = [System.BitConverter]::ToString((Get-FileHash -Path $tmp -Algorithm SHA256).Hash).Replace('-', '').ToLowerInvariant()
-        if (-not ($actualSha.StartsWith($expectedSha.Substring(0,7)))) {
-          throw "Integrity check failed for downloaded script. Expected SHA prefix $($expectedSha.Substring(0,7)), got $($actualSha.Substring(0,7))."
-        } else {
-          Write-Output "SELF-UPDATE: Integrity verified ($($expectedSha.Substring(0,7)))"
-        }
-      }
-    } catch {
-      Write-Warning "SELF-UPDATE: Integrity verification skipped or failed: $($_.Exception.Message)"
+    [Console]::Error.WriteLine('BL_REASON=' + $Reason)
+    if ($Detail) {
+        [Console]::Error.WriteLine('BL_DETAIL=' + ($Detail -replace '[\r\n]+', ' '))
     }
-
-    Write-Output "SELF-UPDATE: Downloaded latest script ($latest). Re-launching..."
-    $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$tmp`"") +
-               ($PSBoundParameters.GetEnumerator() | ForEach-Object {
-                 if ($_.Key -eq 'SelfUpdated') { return $null }
-                 if ($_.Value -is [switch]) { if ($_.Value) { "-$(
-$_.Key)" } }
-                 else { "-$(
-$_.Key)"; "$(
-$_.Value)" }
-               }) + '-SelfUpdated'
-    Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Wait -NoNewWindow
-    exit 0
-  } catch {
-    Write-Warning "SELF-UPDATE: Failed to download latest script: $($_.Exception.Message). Continuing with local version."
-  }
-}
-Invoke-SelfUpdateIfOutdated -RepoRelPath 'ConnectWise-RMM-Asio/Scripts/Windows/checkIfBitlockerEnabled.ps1' -Skip:$SelfUpdated
-
-function Test-IsElevated {
-  try { return ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator) }
-  catch { return $false }
-}
-
-# Elevate when needed (CW RMM as SYSTEM is already elevated)
-if (-not $NoElevate -and -not (Test-IsElevated)) {
-  try {
-    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
-    exit 0
-  } catch {
-    Write-Warning "Elevation failed or was canceled; continuing without elevation."
-  }
 }
 
 function Get-FixedDriveLetters {
-  # Try modern Get-Volume first
-  $letters = @()
-  try {
-    $letters = Get-Volume -ErrorAction Stop |
-      Where-Object { $_.DriveType -eq 'Fixed' -and $_.DriveLetter } |
-      Select-Object -ExpandProperty DriveLetter
-  } catch {
-    # Fall back to CIM for older builds
+    <#
+        Letters of fixed/local volumes only. Removable, optical, network and
+        RAM disks are excluded so a plugged-in USB stick cannot flip the result.
+    #>
+    $letters = @()
     try {
-      $letters = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" |
-        Where-Object { $_.DeviceID -match ':' } |
-        ForEach-Object { $_.DeviceID.Substring(0,1) }
-    } catch {}
-  }
-  return @($letters | Sort-Object -Unique)
-}
-
-function Get-BitLockerEnabledMap {
-  param([string[]]$DriveLetters)
-  $map = @{}
-
-  $blCmd = Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue
-  if ($blCmd) {
-    $vols = Get-BitLockerVolume -ErrorAction SilentlyContinue
-
-    # Build a lookup by drive letter (normalize MountPoint: "C:" or "C:\" -> "C")
-    $volsByLetter = @{}
-    foreach ($v in $vols) {
-      $mp = $null
-      try { $mp = ($v.MountPoint).ToString() } catch { $mp = $null }
-      if ($mp) {
-        $mp = $mp.TrimEnd('\')
-        if ($mp.Length -ge 2 -and $mp[1] -eq ':') {
-          $letter = $mp.Substring(0,1).ToUpper()
-          if ($letter -match '^[A-Z]$') { $volsByLetter[$letter] = $v }
+        $letters = @(Get-Volume -ErrorAction Stop |
+            Where-Object { $_.DriveType -eq 'Fixed' -and $_.DriveLetter } |
+            Select-Object -ExpandProperty DriveLetter)
+    }
+    catch {
+        try {
+            $letters = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop |
+                Where-Object { $_.DeviceID -match '^[A-Za-z]:$' } |
+                ForEach-Object { $_.DeviceID.Substring(0, 1) })
         }
-      }
+        catch { $letters = @() }
     }
 
-    foreach ($dl in $DriveLetters) {
-      $present = Test-Path ("${dl}:\")
-      $enabled = $false
-      if ($present) {
-        $v = $volsByLetter[$dl.ToUpper()]
-        if ($null -ne $v) {
-          # ProtectionStatus is an enum; ToString() yields 'On' when protected
-          $enabled = ($v.ProtectionStatus.ToString() -eq 'On')
-        } else {
-          # Fallback to manage-bde parsing if not found in the lookup
-          $enabled = (Get-ManageBdeEnabled -Drive $dl)
+    return @($letters |
+        Where-Object { $_ } |
+        ForEach-Object { $_.ToString().ToUpperInvariant() } |
+        Sort-Object -Unique)
+}
+
+function Get-ProtectionState {
+    <#
+        Returns 'On', 'Off' or 'Unknown'. Never throws.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Drive,
+        [Parameter(Mandatory)][bool]$HasBitLockerCmdlet,
+        [Parameter(Mandatory)][bool]$HasManageBde
+    )
+
+    $mount = '{0}:' -f $Drive
+
+    if ($HasBitLockerCmdlet) {
+        try {
+            $vol = Get-BitLockerVolume -MountPoint $mount -ErrorAction Stop
+            if ($null -ne $vol -and $vol.PSObject.Properties.Name -contains 'ProtectionStatus') {
+                $state = [string]$vol.ProtectionStatus
+                if ($state -eq 'On' -or $state -eq 'Off') { return $state }
+            }
         }
-      }
-      $map[$dl] = $enabled
+        catch { }
     }
-  } else {
-    foreach ($dl in $DriveLetters) {
-      $map[$dl] = (Get-ManageBdeEnabled -Drive $dl)
+
+    if ($HasManageBde) {
+        try {
+            # Check the output first: if manage-bde failed to start, the exit
+            # code left behind is from whatever ran before it.
+            $raw = & manage-bde -status $mount 2>$null
+            if ($raw) {
+                $hit = $raw | Select-String -Pattern 'Protection\s*Status\s*:\s*(.+)$' | Select-Object -First 1
+                if ($null -ne $hit) {
+                    # manage-bde prints "Protection Status:    Protection On", so
+                    # the captured value carries the "Protection " prefix. Match
+                    # with or without it, and anchor on the word boundary so
+                    # "Off" cannot be read out of an unrelated string.
+                    $value = $hit.Matches[0].Groups[1].Value.Trim() -replace '(?i)^Protection\s+', ''
+                    if ($value -match '^(?i)On\b')  { return 'On' }
+                    if ($value -match '^(?i)Off\b') { return 'Off' }
+                }
+            }
+        }
+        catch { }
     }
-  }
-  return $map
+
+    return 'Unknown'
 }
 
-function Get-ManageBdeEnabled {
-  param([Parameter(Mandatory)] [ValidatePattern('^[A-Fa-f]$')] [string]$Drive)
-  $present = Test-Path ("${Drive}:\")
-  if (-not $present) { return $false }
-  try {
-    $raw = & manage-bde -status "${Drive}:\\" 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $raw) { return $false }
-    $prot = ($raw | Select-String -Pattern 'Protection\s*Status\s*:\s*(.*)' -AllMatches | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() } | Select-Object -First 1)
-    return ($prot -match 'On')
-  } catch { return $false }
+try {
+    $hasBlCmd  = [bool](Get-Command -Name Get-BitLockerVolume -ErrorAction SilentlyContinue)
+    $hasManage = [bool](Get-Command -Name manage-bde -ErrorAction SilentlyContinue)
+
+    if (-not $hasBlCmd -and -not $hasManage) {
+        Write-Reason -Reason 'NO_BITLOCKER_CMDLETS' `
+            -Detail 'neither Get-BitLockerVolume nor manage-bde is available on this host'
+        exit 2
+    }
+
+    $drives = @(Get-FixedDriveLetters)
+    if ($drives.Count -eq 0) {
+        Write-Reason -Reason 'NO_DRIVES' -Detail 'Get-Volume and Win32_LogicalDisk both returned no fixed volumes'
+        exit 2
+    }
+
+    $systemDrive = ''
+    if ($env:SystemDrive) {
+        $systemDrive = $env:SystemDrive.TrimEnd('\').TrimEnd(':').ToUpperInvariant()
+    }
+
+    $anyKnown = $false
+    $anyOn    = $false
+    $unknown  = @()
+
+    foreach ($drive in $drives) {
+        if (-not (Test-Path -LiteralPath ('{0}:\' -f $drive))) { continue }
+
+        $state = Get-ProtectionState -Drive $drive -HasBitLockerCmdlet $hasBlCmd -HasManageBde $hasManage
+
+        switch ($state) {
+            'On'  { $anyKnown = $true; $anyOn = $true }
+            'Off' { $anyKnown = $true }
+            default {
+                # The system volume is the one that matters. If its state is
+                # unreadable, guessing '0' would be a false negative.
+                if ($drive -eq $systemDrive) {
+                    Write-Reason -Reason 'SYSTEM_VOLUME_UNKNOWN' `
+                        -Detail ('{0}: could not be read (Get-BitLockerVolume available: {1}; manage-bde available: {2})' -f $drive, $hasBlCmd, $hasManage)
+                    exit 2
+                }
+                $unknown += $drive
+            }
+        }
+    }
+
+    if (-not $anyKnown) {
+        $detail = 'no fixed drive yielded a readable protection state'
+        if ($unknown.Count -gt 0) { $detail = 'unreadable: ' + ($unknown -join ', ') }
+        Write-Reason -Reason 'ALL_DRIVES_UNKNOWN' -Detail $detail
+        exit 2
+    }
+
+    Write-Output ([int]$anyOn)
+    exit 0
 }
-
-# --- main ---
-$fixedLetters = Get-FixedDriveLetters
-$bitlockerMap = Get-BitLockerEnabledMap -DriveLetters $fixedLetters
-$anyEnabledFixed = $null -ne ($bitlockerMap.Values | Where-Object { $_ }) -and (($bitlockerMap.Values | Where-Object { $_ }).Count -gt 0)
-
-# Emit a single, parseable marker line (some RMM UIs display only the last line)
-Write-Output ([int]$anyEnabledFixed)
-
-exit 0
+catch {
+    Write-Reason -Reason 'UNEXPECTED' -Detail $_.Exception.Message
+    exit 1
+}
