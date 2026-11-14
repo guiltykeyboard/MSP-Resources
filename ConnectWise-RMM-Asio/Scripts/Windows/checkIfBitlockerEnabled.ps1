@@ -42,7 +42,7 @@
       SYSTEM_VOLUME_UNKNOWN  the system volume's state could not be read
       ALL_DRIVES_UNKNOWN     no fixed drive yielded a readable state
       UNEXPECTED             an exception escaped; detail carries the message
-    Version: 2.1.0
+    Version: 2.1.1
 #>
 [CmdletBinding()]
 param(
@@ -126,9 +126,13 @@ function Get-ProtectionState {
             if ($raw) {
                 $hit = $raw | Select-String -Pattern 'Protection\s*Status\s*:\s*(.+)$' | Select-Object -First 1
                 if ($null -ne $hit) {
-                    $value = $hit.Matches[0].Groups[1].Value.Trim()
-                    if ($value -match '^On')  { return 'On' }
-                    if ($value -match '^Off') { return 'Off' }
+                    # manage-bde prints "Protection Status:    Protection On", so
+                    # the captured value carries the "Protection " prefix. Match
+                    # with or without it, and anchor on the word boundary so
+                    # "Off" cannot be read out of an unrelated string.
+                    $value = $hit.Matches[0].Groups[1].Value.Trim() -replace '(?i)^Protection\s+', ''
+                    if ($value -match '^(?i)On\b')  { return 'On' }
+                    if ($value -match '^(?i)Off\b') { return 'Off' }
                 }
             }
         }
