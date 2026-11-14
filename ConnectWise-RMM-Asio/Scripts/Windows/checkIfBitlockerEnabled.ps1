@@ -7,8 +7,9 @@
 .DESCRIPTION
     Read-only. Emits '1' or '0' on stdout and nothing else, so the caller's
     single-line match is unambiguous. When the state cannot be determined it
-    prints NOTHING and exits non-zero, so no caller can record a guess as an
-    answer.
+    prints NOTHING on stdout, writes a machine-readable reason to stderr, and
+    exits non-zero - so no caller can record a guess as an answer, and the
+    reason for the silence survives into the RMM script log.
 
     No network access. No self-update. No files written. No elevation.
 
@@ -32,9 +33,16 @@
 .NOTES
     Exit codes:
       0  verdict emitted
-      2  could not determine (system volume unreadable, no fixed drives)
+      2  could not determine - a BL_REASON= line on stderr says why
       1  unexpected error
-    Version: 2.0.0
+
+    stderr reasons:
+      NO_BITLOCKER_CMDLETS   neither Get-BitLockerVolume nor manage-bde exists
+      NO_DRIVES              no fixed drives enumerated
+      SYSTEM_VOLUME_UNKNOWN  the system volume's state could not be read
+      ALL_DRIVES_UNKNOWN     no fixed drive yielded a readable state
+      UNEXPECTED             an exception escaped; detail carries the message
+    Version: 2.1.0
 #>
 [CmdletBinding()]
 param(
@@ -44,6 +52,22 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Write-Reason {
+    <#
+        Machine-readable reason on stderr, never on stdout. stdout carries the
+        verdict and nothing else; the caller relays these lines to the log.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Reason,
+        [string]$Detail
+    )
+
+    [Console]::Error.WriteLine('BL_REASON=' + $Reason)
+    if ($Detail) {
+        [Console]::Error.WriteLine('BL_DETAIL=' + ($Detail -replace '[\r\n]+', ' '))
+    }
+}
 
 function Get-FixedDriveLetters {
     <#
@@ -74,15 +98,16 @@ function Get-FixedDriveLetters {
 function Get-ProtectionState {
     <#
         Returns 'On', 'Off' or 'Unknown'. Never throws.
-
-        Get-BitLockerVolume first, manage-bde as the fallback for hosts where
-        the BitLocker module is absent.
     #>
-    param([Parameter(Mandatory)][string]$Drive)
+    param(
+        [Parameter(Mandatory)][string]$Drive,
+        [Parameter(Mandatory)][bool]$HasBitLockerCmdlet,
+        [Parameter(Mandatory)][bool]$HasManageBde
+    )
 
     $mount = '{0}:' -f $Drive
 
-    if (Get-Command -Name Get-BitLockerVolume -ErrorAction SilentlyContinue) {
+    if ($HasBitLockerCmdlet) {
         try {
             $vol = Get-BitLockerVolume -MountPoint $mount -ErrorAction Stop
             if ($null -ne $vol -and $vol.PSObject.Properties.Name -contains 'ProtectionStatus') {
@@ -93,27 +118,39 @@ function Get-ProtectionState {
         catch { }
     }
 
-    try {
-        # Check the output first: if manage-bde is absent the exit code is stale.
-        $raw = & manage-bde -status $mount 2>$null
-        if (-not $raw) { return 'Unknown' }
-
-        $hit = $raw | Select-String -Pattern 'Protection\s*Status\s*:\s*(.+)$' | Select-Object -First 1
-        if ($null -eq $hit) { return 'Unknown' }
-
-        $value = $hit.Matches[0].Groups[1].Value.Trim()
-        if ($value -match '^On')  { return 'On' }
-        if ($value -match '^Off') { return 'Off' }
+    if ($HasManageBde) {
+        try {
+            # Check the output first: if manage-bde failed to start, the exit
+            # code left behind is from whatever ran before it.
+            $raw = & manage-bde -status $mount 2>$null
+            if ($raw) {
+                $hit = $raw | Select-String -Pattern 'Protection\s*Status\s*:\s*(.+)$' | Select-Object -First 1
+                if ($null -ne $hit) {
+                    $value = $hit.Matches[0].Groups[1].Value.Trim()
+                    if ($value -match '^On')  { return 'On' }
+                    if ($value -match '^Off') { return 'Off' }
+                }
+            }
+        }
+        catch { }
     }
-    catch { }
 
     return 'Unknown'
 }
 
 try {
+    $hasBlCmd  = [bool](Get-Command -Name Get-BitLockerVolume -ErrorAction SilentlyContinue)
+    $hasManage = [bool](Get-Command -Name manage-bde -ErrorAction SilentlyContinue)
+
+    if (-not $hasBlCmd -and -not $hasManage) {
+        Write-Reason -Reason 'NO_BITLOCKER_CMDLETS' `
+            -Detail 'neither Get-BitLockerVolume nor manage-bde is available on this host'
+        exit 2
+    }
+
     $drives = @(Get-FixedDriveLetters)
     if ($drives.Count -eq 0) {
-        [Console]::Error.WriteLine('BL_CHECK: no fixed drives enumerated')
+        Write-Reason -Reason 'NO_DRIVES' -Detail 'Get-Volume and Win32_LogicalDisk both returned no fixed volumes'
         exit 2
     }
 
@@ -124,11 +161,12 @@ try {
 
     $anyKnown = $false
     $anyOn    = $false
+    $unknown  = @()
 
     foreach ($drive in $drives) {
         if (-not (Test-Path -LiteralPath ('{0}:\' -f $drive))) { continue }
 
-        $state = Get-ProtectionState -Drive $drive
+        $state = Get-ProtectionState -Drive $drive -HasBitLockerCmdlet $hasBlCmd -HasManageBde $hasManage
 
         switch ($state) {
             'On'  { $anyKnown = $true; $anyOn = $true }
@@ -137,15 +175,19 @@ try {
                 # The system volume is the one that matters. If its state is
                 # unreadable, guessing '0' would be a false negative.
                 if ($drive -eq $systemDrive) {
-                    [Console]::Error.WriteLine(('BL_CHECK: protection state unknown for {0}:' -f $drive))
+                    Write-Reason -Reason 'SYSTEM_VOLUME_UNKNOWN' `
+                        -Detail ('{0}: could not be read (Get-BitLockerVolume available: {1}; manage-bde available: {2})' -f $drive, $hasBlCmd, $hasManage)
                     exit 2
                 }
+                $unknown += $drive
             }
         }
     }
 
     if (-not $anyKnown) {
-        [Console]::Error.WriteLine('BL_CHECK: protection state unknown for all fixed drives')
+        $detail = 'no fixed drive yielded a readable protection state'
+        if ($unknown.Count -gt 0) { $detail = 'unreadable: ' + ($unknown -join ', ') }
+        Write-Reason -Reason 'ALL_DRIVES_UNKNOWN' -Detail $detail
         exit 2
     }
 
@@ -153,6 +195,6 @@ try {
     exit 0
 }
 catch {
-    [Console]::Error.WriteLine('BL_CHECK: ' + $_.Exception.Message)
+    Write-Reason -Reason 'UNEXPECTED' -Detail $_.Exception.Message
     exit 1
 }
