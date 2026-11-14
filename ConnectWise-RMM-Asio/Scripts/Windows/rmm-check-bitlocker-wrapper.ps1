@@ -37,12 +37,16 @@
     wrote. That also removes the need to relax $ErrorActionPreference: there is
     no ErrorRecord to terminate on.
 
-    Two Start-Process details this depends on, both of which fail loudly if
-    changed: -NoNewWindow cannot be combined with -WindowStyle (the cmdlet
-    rejects the pair outright), so only -WindowStyle Hidden is used; and
-    -ArgumentList is joined into ONE command line, so the payload path has to
-    carry its own quotes or a %TEMP% under a user profile with a space in it
-    gets truncated at the first space.
+    Three Start-Process details this depends on, each of which fails loudly if
+    changed:
+      * -NoNewWindow cannot be combined with -WindowStyle, so only -WindowStyle
+        Hidden is used;
+      * -ArgumentList is joined into ONE command line, so the payload path has
+        to carry its own quotes or a %TEMP% under a profile with a space in it
+        is truncated at the first space;
+      * everything after -File belongs to the script rather than to
+        powershell.exe, so -NoElevate and -SelfUpdated go after the path. Ahead
+        of it they are rejected as unknown CLI options.
 
     Why the SHA: fetching /main/ can be served stale by the GitHub CDN, and
     fetching by branch with a cache-buster is the problem the old self-updater
@@ -77,7 +81,7 @@
     Exit codes:
       0  verdict emitted on stdout
       1  no verdict - the BL_ lines say why
-    Version: 2.3.3
+    Version: 2.3.4
 
     Reasons raised here:
       DOWNLOAD_HTTP_404       path or ref not found at the remote
@@ -276,7 +280,12 @@ catch {
 # The argument list is joined into one command line, so the payload path is
 # quoted here rather than left to the array. Without it, a %TEMP% under a user
 # profile with a space truncates the path at the first space.
-$childArgs = '-NoProfile -ExecutionPolicy Bypass -NoElevate -SelfUpdated -File "{0}"' -f $tmp
+#
+# Everything after -File belongs to the script, not to powershell.exe. -NoElevate
+# and -SelfUpdated are payload parameters, so they come after the quoted path -
+# ahead of it, powershell.exe rejects them as unknown CLI options and the child
+# dies before the payload runs.
+$childArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -NoElevate -SelfUpdated' -f $tmp
 
 $stdoutOut = @()
 $stderrOut = @()
