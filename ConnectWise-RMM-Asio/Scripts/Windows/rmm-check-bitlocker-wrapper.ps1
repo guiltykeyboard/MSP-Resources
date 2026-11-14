@@ -34,9 +34,15 @@
     "powershell.exe : BL_REASON=SYSTEM_VOLUME_UNKNOWN" followed by an At-line
     block, and the anchored match below would never see it. Start-Process
     redirects at the OS handle, so the file holds exactly the bytes the payload
-    wrote. The same trap is why the preference variable was previously relaxed
-    around the call: with 2>&1 under 'Stop', the first native stderr line became
-    a terminating error. Neither workaround is needed with Start-Process.
+    wrote. That also removes the need to relax $ErrorActionPreference: there is
+    no ErrorRecord to terminate on.
+
+    Two Start-Process details this depends on, both of which fail loudly if
+    changed: -NoNewWindow cannot be combined with -WindowStyle (the cmdlet
+    rejects the pair outright), so only -WindowStyle Hidden is used; and
+    -ArgumentList is joined into ONE command line, so the payload path has to
+    carry its own quotes or a %TEMP% under a user profile with a space in it
+    gets truncated at the first space.
 
     Why the SHA: fetching /main/ can be served stale by the GitHub CDN, and
     fetching by branch with a cache-buster is the problem the old self-updater
@@ -71,7 +77,7 @@
     Exit codes:
       0  verdict emitted on stdout
       1  no verdict - the BL_ lines say why
-    Version: 2.3.2
+    Version: 2.3.3
 
     Reasons raised here:
       DOWNLOAD_HTTP_404       path or ref not found at the remote
@@ -263,6 +269,15 @@ catch {
 # "powershell.exe : BL_REASON=SYSTEM_VOLUME_UNKNOWN" and the anchored match
 # below would never see it. This redirects at the OS handle instead, so the
 # file holds exactly the bytes the payload wrote.
+#
+# -WindowStyle Hidden alone, never with -NoNewWindow: the cmdlet rejects that
+# pair outright, and the rejection happens before the child ever starts.
+#
+# The argument list is joined into one command line, so the payload path is
+# quoted here rather than left to the array. Without it, a %TEMP% under a user
+# profile with a space truncates the path at the first space.
+$childArgs = '-NoProfile -ExecutionPolicy Bypass -NoElevate -SelfUpdated -File "{0}"' -f $tmp
+
 $stdoutOut = @()
 $stderrOut = @()
 $code      = -1
@@ -270,8 +285,8 @@ $launch    = $null
 
 try {
     $proc = Start-Process -FilePath 'powershell.exe' `
-        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $tmp, '-NoElevate', '-SelfUpdated') `
-        -NoNewWindow -WindowStyle Hidden -Wait -PassThru `
+        -ArgumentList $childArgs `
+        -WindowStyle Hidden -Wait -PassThru `
         -RedirectStandardOutput $outFile -RedirectStandardError $errFile
 
     if ($proc) { $code = $proc.ExitCode }
