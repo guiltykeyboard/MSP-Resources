@@ -9,9 +9,10 @@
     child process so its exit code cannot escape into this script, and prints a
     single line to stdout on success.
 
-    Leave nothing behind: the payload and its stderr are written to %TEMP% under
-    a GUID name and removed in a finally block, and no cache file is written at
-    all unless the caller explicitly asks for one with -ShaCacheMinutes.
+    Leaves nothing behind: the payload, its stdout and its stderr are written to
+    %TEMP% under GUID names and removed before the script ends, and no cache file
+    is written at all unless the caller explicitly asks for one with
+    -ShaCacheMinutes.
 
     When there is no verdict it prints no digit at all. Instead it writes BL_*
     lines, which the RMM step output carries into the script log:
@@ -27,12 +28,15 @@
     The point is that "we could not tell" is never silent: the reason, the ref
     that was requested, and the URL are all in the log.
 
-    Child streams are separated rather than merged. On Windows PowerShell 5.1 a
-    native command's stderr becomes an ErrorRecord when redirected with 2>&1,
-    and $ErrorActionPreference = 'Stop' turns the first of those into a
-    terminating error - which would push every payload failure into the
-    CHILD_START_FAILED path and throw away its reason. So stderr is redirected
-    to a file and the preference is relaxed for the call itself.
+    Child streams are captured with Start-Process, not with 2> redirection. On
+    Windows PowerShell 5.1 file redirection of a native stderr stream goes
+    through Out-File, so the first line lands as
+    "powershell.exe : BL_REASON=SYSTEM_VOLUME_UNKNOWN" followed by an At-line
+    block, and the anchored match below would never see it. Start-Process
+    redirects at the OS handle, so the file holds exactly the bytes the payload
+    wrote. The same trap is why the preference variable was previously relaxed
+    around the call: with 2>&1 under 'Stop', the first native stderr line became
+    a terminating error. Neither workaround is needed with Start-Process.
 
     Why the SHA: fetching /main/ can be served stale by the GitHub CDN, and
     fetching by branch with a cache-buster is the problem the old self-updater
@@ -67,7 +71,7 @@
     Exit codes:
       0  verdict emitted on stdout
       1  no verdict - the BL_ lines say why
-    Version: 2.3.1
+    Version: 2.3.2
 
     Reasons raised here:
       DOWNLOAD_HTTP_404       path or ref not found at the remote
@@ -240,6 +244,7 @@ else {
 }
 
 $tmp     = Join-Path $env:TEMP ('chkbl_{0}.ps1' -f ([guid]::NewGuid().ToString('N')))
+$outFile = Join-Path $env:TEMP ('chkbl_{0}.out' -f ([guid]::NewGuid().ToString('N')))
 $errFile = Join-Path $env:TEMP ('chkbl_{0}.err' -f ([guid]::NewGuid().ToString('N')))
 
 # --- fetch -------------------------------------------------------------------
@@ -253,26 +258,35 @@ catch {
 }
 
 # --- run ---------------------------------------------------------------------
-# stderr goes to its own file, and the preference is relaxed for the call: on
-# PowerShell 5.1 a redirected native stderr would otherwise raise a terminating
-# error under 'Stop' and every payload reason would be lost.
+# Start-Process, not `2>`: on PowerShell 5.1 file redirection of a native
+# stderr stream goes through Out-File, so the first line is written as
+# "powershell.exe : BL_REASON=SYSTEM_VOLUME_UNKNOWN" and the anchored match
+# below would never see it. This redirects at the OS handle instead, so the
+# file holds exactly the bytes the payload wrote.
 $stdoutOut = @()
 $stderrOut = @()
 $code      = -1
 $launch    = $null
-$prevEap   = $ErrorActionPreference
 
 try {
-    $ErrorActionPreference = 'Continue'
-    $stdoutOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tmp -NoElevate -SelfUpdated 2> $errFile
-    $code      = $LASTEXITCODE
+    $proc = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $tmp, '-NoElevate', '-SelfUpdated') `
+        -NoNewWindow -WindowStyle Hidden -Wait -PassThru `
+        -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+
+    if ($proc) { $code = $proc.ExitCode }
 }
 catch {
     $launch = $_.Exception.Message
 }
 finally {
-    $ErrorActionPreference = $prevEap
     Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+}
+
+if (Test-Path -LiteralPath $outFile) {
+    try { $stdoutOut = @(Get-Content -LiteralPath $outFile -ErrorAction Stop) }
+    catch { $stdoutOut = @() }
+    Remove-Item -LiteralPath $outFile -Force -ErrorAction SilentlyContinue
 }
 
 if (Test-Path -LiteralPath $errFile) {
@@ -281,14 +295,9 @@ if (Test-Path -LiteralPath $errFile) {
     Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
 }
 
-if ($launch) {
-    Write-Failure -Reason 'CHILD_START_FAILED' -Detail $launch -Ref $ref -Url $url
-}
-
-if (-not $stdoutOut -and -not $stderrOut) {
-    Write-Failure -Reason 'CHILD_START_FAILED' `
-        -Detail 'the nested request produced no output on stdout or stderr' `
-        -Ref $ref -Url $url
+if ($launch -or $code -lt 0) {
+    $detail = if ($launch) { $launch } else { 'the child process did not report an exit code' }
+    Write-Failure -Reason 'CHILD_START_FAILED' -Detail $detail -Ref $ref -Url $url
 }
 
 # --- interpret ---------------------------------------------------------------
