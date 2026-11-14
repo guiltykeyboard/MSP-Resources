@@ -23,13 +23,20 @@
     The point is that "we could not tell" is never silent: the reason, the ref
     that was requested, and the URL are all in the log.
 
+    Child streams are separated rather than merged. On Windows PowerShell 5.1 a
+    native command's stderr becomes an ErrorRecord when redirected with 2>&1,
+    and $ErrorActionPreference = 'Stop' turns the first of those into a
+    terminating error - which would push every payload failure into the
+    CHILD_START_FAILED path and throw away its reason. So stderr is redirected
+    to a file and the preference is relaxed for the call itself.
+
     Why the SHA: fetching /main/ can be served stale by the GitHub CDN, and
     fetching by branch with a cache-buster is the problem the old self-updater
     was invented to patch. Content at a commit SHA is immutable, so a stale copy
-    is structurally impossible. The resolved SHA is cached locally for a few
-    minutes so a fleet behind one egress IP does not exhaust GitHub's
-    unauthenticated API limit; when resolution fails the wrapper falls back to
-    the branch name and BL_REF shows that it did.
+    is structurally impossible. The resolved SHA is cached per repository so a
+    fleet behind one egress IP does not exhaust GitHub's unauthenticated API
+    limit; when resolution fails the wrapper falls back to the branch name and
+    BL_REF shows that it did.
 
     Why -SelfUpdated on the child: it suppresses the legacy self-updater in the
     v1 payload, so this wrapper is safe to deploy BEFORE the new payload lands.
@@ -54,7 +61,7 @@
     Exit codes:
       0  verdict emitted on stdout
       1  no verdict - the BL_ lines say why
-    Version: 2.1.0
+    Version: 2.2.0
 
     Reasons raised here:
       DOWNLOAD_HTTP_404       path or ref not found at the remote
@@ -163,6 +170,10 @@ function Resolve-CommitRef {
         Resolve the branch tip to a commit SHA, caching it locally for a short
         while. Returns $null when it cannot be resolved; the caller then falls
         back to the branch name and the log shows that.
+
+        The cache entry is keyed on the repository: two repositories on one
+        endpoint would otherwise reuse each other's SHA inside the window, and
+        the second download would 404 against a commit that does not exist there.
     #>
     param(
         [Parameter(Mandatory)][string]$Repo,
@@ -170,7 +181,8 @@ function Resolve-CommitRef {
     )
 
     $cacheDir  = Join-Path $env:ProgramData 'iTech\RMM'
-    $cacheFile = Join-Path $cacheDir 'bitlocker-check-ref.txt'
+    $cacheKey  = ($Repo -replace '[^A-Za-z0-9._-]', '_')
+    $cacheFile = Join-Path $cacheDir ('bitlocker-check-ref_{0}.txt' -f $cacheKey)
     $now       = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
     if ($CacheMinutes -gt 0 -and (Test-Path -LiteralPath $cacheFile)) {
@@ -196,7 +208,7 @@ function Resolve-CommitRef {
                 if (-not (Test-Path -LiteralPath $cacheDir)) {
                     New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
                 }
-                Set-Content -LiteralPath $cacheFile -Value ('{0}|{1}' -f $now, $sha) -Encoding ASCII -ErrorAction Stop
+                Set-Content -LiteralPath $cacheFile -Value ('{0}|{1}|{2}' -f $now, $sha, $Repo) -Encoding ASCII -ErrorAction Stop
             }
             catch { }
             return $sha
@@ -210,8 +222,9 @@ function Resolve-CommitRef {
 $ref = Resolve-CommitRef -Repo $Repo -CacheMinutes $ShaCacheMinutes
 if (-not $ref) { $ref = 'main' }
 
-$url = 'https://raw.githubusercontent.com/{0}/{1}/{2}' -f $Repo, $ref, $RelPath
-$tmp = Join-Path $env:TEMP ('chkbl_{0}.ps1' -f ([guid]::NewGuid().ToString('N')))
+$url     = 'https://raw.githubusercontent.com/{0}/{1}/{2}' -f $Repo, $ref, $RelPath
+$tmp     = Join-Path $env:TEMP ('chkbl_{0}.ps1' -f ([guid]::NewGuid().ToString('N')))
+$errFile = Join-Path $env:TEMP ('chkbl_{0}.err' -f ([guid]::NewGuid().ToString('N')))
 
 # --- fetch -------------------------------------------------------------------
 try {
@@ -224,42 +237,62 @@ catch {
 }
 
 # --- run ---------------------------------------------------------------------
-$out  = @()
-$code = -1
+# stderr goes to its own file, and the preference is relaxed for the call: on
+# PowerShell 5.1 a redirected native stderr would otherwise raise a terminating
+# error under 'Stop' and every payload reason would be lost.
+$stdoutOut = @()
+$stderrOut = @()
+$code      = -1
+$launch    = $null
+$prevEap   = $ErrorActionPreference
 
 try {
-    $out  = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tmp -NoElevate -SelfUpdated 2>&1
-    $code = $LASTEXITCODE
+    $ErrorActionPreference = 'Continue'
+    $stdoutOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tmp -NoElevate -SelfUpdated 2> $errFile
+    $code      = $LASTEXITCODE
 }
 catch {
-    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-    Write-Failure -Reason 'CHILD_START_FAILED' -Detail $_.Exception.Message -Ref $ref -Url $url
+    $launch = $_.Exception.Message
 }
 finally {
+    $ErrorActionPreference = $prevEap
     Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+}
+
+if (Test-Path -LiteralPath $errFile) {
+    try { $stderrOut = @(Get-Content -LiteralPath $errFile -ErrorAction Stop) }
+    catch { $stderrOut = @() }
+    Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+}
+
+if ($launch) {
+    Write-Failure -Reason 'CHILD_START_FAILED' -Detail $launch -Ref $ref -Url $url
+}
+
+if (-not $stdoutOut -and -not $stderrOut) {
+    Write-Failure -Reason 'CHILD_START_FAILED' `
+        -Detail 'the nested request produced no output on stdout or stderr' `
+        -Ref $ref -Url $url
 }
 
 # --- interpret ---------------------------------------------------------------
-# A verdict is a clean 0 or 1 from a child that exited 0. There is deliberately
-# no "take the last line" fallback: that is what turned log prose into a Yes.
+# A verdict is a clean 0 or 1 on stdout from a child that exited 0. There is
+# deliberately no "take the last line" fallback: that is what turned log prose
+# into a Yes. Reasons are read from stderr, where the payload writes them.
 $val         = $null
 $childReason = $null
 $childDetail = $null
 
-foreach ($line in $out) {
+foreach ($line in $stderrOut) {
     $text = $line.ToString().Trim()
 
-    if ($text -match '^BL_REASON=(.+)$') {
-        $childReason = $Matches[1]
-        continue
-    }
-    if ($text -match '^BL_DETAIL=(.+)$') {
-        $childDetail = $Matches[1]
-        continue
-    }
-    if ($text -eq '0' -or $text -eq '1') {
-        $val = $text
-    }
+    if ($text -match '^BL_REASON=(.+)$') { $childReason = $Matches[1]; continue }
+    if ($text -match '^BL_DETAIL=(.+)$') { $childDetail = $Matches[1]; continue }
+}
+
+foreach ($line in $stdoutOut) {
+    $text = $line.ToString().Trim()
+    if ($text -eq '0' -or $text -eq '1') { $val = $text }
 }
 
 if ($code -ne 0) {
@@ -270,7 +303,7 @@ if ($code -ne 0) {
 
 if ($null -eq $val) {
     Write-Failure -Reason 'NO_DIGIT_IN_OUTPUT' `
-        -Detail 'nested request exited 0 but printed neither 0 nor 1' `
+        -Detail 'nested request exited 0 but printed neither 0 nor 1 on stdout' `
         -Ref $ref -Url $url
 }
 
