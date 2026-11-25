@@ -22,6 +22,15 @@
       exit 2 rather than installing an agent that silently binds to nothing. The key
       is never written to the log; only a masked hint is.
 
+    INTEGRITY
+      DNSFilter publishes <installer>.sha256sum.asc beside each unversioned
+      installer. Before anything is installed the script downloads that document,
+      extracts the SHA256, and compares it with the file it just downloaded. A
+      mismatch deletes the installer and stops with exit 2 - nothing runs. The hash
+      is also recorded per architecture so a later run can report whether the
+      published build actually changed. This checks integrity, not authenticity:
+      the PGP signature on the .asc is not verified here.
+
     STAGING
       The MSI is downloaded to a GUID subfolder of $env:TEMP, installed from there,
       and that folder is deleted in a finally block, so neither installer nor
@@ -77,6 +86,11 @@
     After a successful install, resolve dnsfilter.com against 127.0.0.1 and record
     the answer. Informational only; never changes the exit code.
 
+.PARAMETER ChecksumVerification
+    Auto (default) verifies the downloaded MSI against the published
+    <installer>.sha256sum.asc and warns when that file cannot be read. Require
+    makes an unreadable checksum fatal. Skip disables the check.
+
 .PARAMETER LogPath
     Transcript log. Default %ProgramData%\iTech\Logs\DNSFilter-Agent-<host>.log
 
@@ -103,6 +117,10 @@
     # Pre-flight an uninstall: reports what would be removed, changes nothing
     .\Deploy-DNSFilterAgent.ps1 -Uninstall -TestOnly
 
+.EXAMPLE
+    # Refuse to install unless the published checksum could be verified
+    .\Deploy-DNSFilterAgent.ps1 -ChecksumVerification Require
+
 .NOTES
     Target: Windows 10/11 and Server 2016+ on x64 and ARM64. Windows Installer
     handles the ARM64 MSI natively on Windows 11 ARM64.
@@ -114,6 +132,8 @@
 
 .LINK
     https://help.dnsfilter.com/hc/en-us/articles/1500008104822-Windows-Roaming-Client-Deployment-Guide
+.LINK
+    https://help.dnsfilter.com/hc/en-us/articles/31177309034899-Windows-Roaming-Client-Silent-Remote-tool-Install
 #>
 
 #Requires -Version 5.1
@@ -138,7 +158,10 @@ param(
     [string]$LogPath = "$env:ProgramData\iTech\Logs\DNSFilter-Agent-$env:COMPUTERNAME.log",
 
     [ValidateRange(1, 10)]
-    [int]$DownloadRetries = 3
+    [int]$DownloadRetries = 3,
+
+    [ValidateSet('Auto', 'Require', 'Skip')]
+    [string]$ChecksumVerification = 'Auto'
 )
 
 # Baked commit fallback (replaced by CI)
@@ -169,6 +192,10 @@ $script:Result = [ordered]@{
     version      = $null
     service      = $null
     resolverProbe = $null
+    checksumStatus   = 'not-checked'
+    checksumExpected = $null
+    checksumActual   = $null
+    buildChanged     = $null
     exitCode     = 0
     detail       = $null
 }
@@ -392,6 +419,93 @@ function New-StagingDirectory {
 }
 
 # --------------------------------------------------------------------------
+# Installer integrity
+# --------------------------------------------------------------------------
+function ConvertFrom-ChecksumDocument {
+    # The published file is an ASCII-armoured checksum document. Formats seen:
+    #   <hash>  <filename>            (sha256sum)
+    #   <hash> *<filename>            (sha256sum binary mode)
+    #   SHA256 (<filename>) = <hash>  (BSD / openssl)
+    # wrapped in PGP armour, so parse by shape rather than by line position. A
+    # bare filename or the word SHA256 must never be mistaken for the hash.
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory)][string]$InstallerName
+    )
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $fallback = $null
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -match '^\s*([0-9a-fA-F]{64})\s+\*?(\S+)\s*$') {
+            $candidate = $Matches[1]
+            $name      = $Matches[2]
+            if ($name -eq $InstallerName -or $name -like "*$InstallerName") { return $candidate.ToUpper() }
+            if (-not $fallback) { $fallback = $candidate.ToUpper() }
+            continue
+        }
+        if ($line -match 'SHA256\s*\((.+?)\)\s*=\s*([0-9a-fA-F]{64})') {
+            if ($Matches[1] -like "*$InstallerName") { return $Matches[2].ToUpper() }
+            if (-not $fallback) { $fallback = $Matches[2].ToUpper() }
+        }
+    }
+    return $fallback
+}
+
+function Get-PublishedChecksum {
+    # Download and parse the vendor's checksum document. Returns the hash plus a
+    # reason when it could not be read; the caller decides whether that is fatal.
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$InstallerName,
+        [Parameter(Mandatory)][string]$WorkDir
+    )
+    $tempFile = Join-Path $WorkDir 'checksum.asc'
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $tempFile -UseBasicParsing -ErrorAction Stop
+    } catch {
+        return [pscustomobject]@{ Hash = $null; Reason = ('checksum file could not be downloaded: {0}' -f $_.Exception.Message) }
+    }
+    $text = ''
+    try {
+        $text = Get-Content -LiteralPath $tempFile -Raw -ErrorAction Stop
+    } catch {
+        return [pscustomobject]@{ Hash = $null; Reason = 'checksum file could not be read' }
+    } finally {
+        Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
+    }
+    $hash = ConvertFrom-ChecksumDocument -Text $text -InstallerName $InstallerName
+    if (-not $hash) { return [pscustomobject]@{ Hash = $null; Reason = 'no SHA256 value found in the checksum file' } }
+    return [pscustomobject]@{ Hash = $hash; Reason = $null }
+}
+
+function Get-BuildRecordPath {
+    # Remembers the published hash per architecture so a later run can say whether
+    # the build actually changed. The installer itself is still never kept.
+    param([Parameter(Mandatory)][string]$Architecture)
+    $dir = Split-Path -Parent $LogPath
+    if ([string]::IsNullOrWhiteSpace($dir)) { return $null }
+    return (Join-Path $dir ('DNSFilter-agent-{0}.build' -f $Architecture))
+}
+
+function Read-BuildRecord {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try { return (Get-Content -LiteralPath $Path -Raw -ErrorAction Stop).Trim() } catch { return $null }
+}
+
+function Save-BuildRecord {
+    param([string]$Path, [string]$Hash)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    try {
+        $dir = Split-Path -Parent $Path
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        Set-Content -LiteralPath $Path -Value $Hash -Encoding ASCII -ErrorAction Stop
+    } catch {
+        Write-Log -Level WARN -Message ('Could not record the installer hash: {0}' -f $_.Exception.Message)
+    }
+}
+
+# --------------------------------------------------------------------------
 # Main workflow
 # --------------------------------------------------------------------------
 function Invoke-Deployment {
@@ -551,6 +665,57 @@ function Invoke-Deployment {
         $script:Result.detail = 'MSI signature check failed'
         $script:ExitCode = 2
         throw [System.OperationCanceledException]::new('invalid-package')
+    }
+
+    # ---- integrity: published SHA256 before anything is installed ----
+    if ($ChecksumVerification -eq 'Skip') {
+        $script:Result.checksumStatus = 'skipped'
+        Write-Log -Level WARN -Message 'Checksum verification skipped by request; the installer is unverified.'
+    } else {
+        $checksumUrl = $packageUrl + '.sha256sum.asc'
+        Write-Log -Message ('Fetching published checksum {0}' -f $checksumUrl)
+        $published = Get-PublishedChecksum -Url $checksumUrl -InstallerName $msiName -WorkDir $script:WorkDir
+        if ($published.Hash) {
+            $actual = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash.ToUpper()
+            $script:Result.checksumExpected = $published.Hash
+            $script:Result.checksumActual   = $actual
+            if ($actual -ne $published.Hash) {
+                Remove-Item -LiteralPath $msiPath -Force -ErrorAction SilentlyContinue
+                Write-Log -Level ERROR -Message ('Checksum mismatch: published={0} downloaded={1}. The damaged installer was deleted and nothing was installed.' -f $published.Hash, $actual)
+                $script:Result.checksumStatus = 'mismatch'
+                $script:Result.status = 'checksum-mismatch'
+                $script:ExitCode = 2
+                throw [System.OperationCanceledException]::new('checksum-mismatch')
+            }
+            $script:Result.checksumStatus = 'verified'
+            Write-Log -Level OK -Message ('Checksum verified against the published SHA256: {0}' -f $published.Hash)
+
+            $recordPath = Get-BuildRecordPath -Architecture $Architecture
+            $previous   = Read-BuildRecord -Path $recordPath
+            if ($previous) {
+                $script:Result.buildChanged = ($previous.ToUpper() -ne $published.Hash)
+                if ($script:Result.buildChanged) {
+                    Write-Log -Message ('Published build changed since the last run ({0} -> {1}).' -f $previous, $published.Hash)
+                } else {
+                    Write-Log -Message 'Published build is unchanged since the last run.'
+                }
+            } else {
+                $script:Result.buildChanged = $true
+                Write-Log -Message 'No previous build hash recorded; this is the first observation.'
+            }
+            Save-BuildRecord -Path $recordPath -Hash $published.Hash
+        } else {
+            $script:Result.checksumStatus = 'unavailable'
+            if ($ChecksumVerification -eq 'Require') {
+                Remove-Item -LiteralPath $msiPath -Force -ErrorAction SilentlyContinue
+                Write-Log -Level ERROR -Message ('Checksum verification was required but the published checksum is unusable: {0}. Nothing was installed.' -f $published.Reason)
+                $script:Result.status = 'checksum-unavailable'
+                $script:Result.detail = $published.Reason
+                $script:ExitCode = 2
+                throw [System.OperationCanceledException]::new('checksum-unavailable')
+            }
+            Write-Log -Level WARN -Message ('Could not verify the installer against a published checksum ({0}). The MSI signature check passed but integrity is unconfirmed; use -ChecksumVerification Require to make this fatal.' -f $published.Reason)
+        }
     }
 
     # ---- install ----
