@@ -38,11 +38,23 @@
       endpoint has no working DNS. -DnsCleanup Clean (default) strips loopback
       servers from active adapters and falls back to DHCP when nothing else
       remains; Report only lists them.
+
+      Known residue addresses: all of 127.0.0.0/8, plus the exact addresses in
+      -ResidueDnsAddresses (default 127.0.0.1, 127.0.0.2, 172.0.0.2). Builds in the
+      field have left adapters pointed at 172.0.0.2, which took the endpoint off the
+      network entirely until someone reset the adapter by hand - often on site.
+      Anything outside loopback is matched EXACTLY, so a site's real resolver in
+      172.16.0.0/12 is never removed. After changing an adapter the value is read
+      back; if the dead address survived, the adapter is reported as failed rather
+      than repaired.
+
+      A machine with no agent left at all is still worth running the script on: that
+      is the broken endpoint, and the DNS repair runs there too.
+
       Clean only runs once the agent is actually gone. While a product is still
-      registered or its service still exists, 127.0.0.1 is doing its job, so a
-      failed uninstall downgrades the DNS pass to report-only rather than disabling
-      protection. A DNS pass that cannot inspect an adapter fails the run: an
-      uninspected endpoint is not a clean one.
+      registered or its service still exists, the loopback resolver is doing its job,
+      so a failed uninstall downgrades the pass to report-only instead of disabling
+      protection.
 
     OUTPUT
       One-line JSON on STDOUT plus an MSI log digest.
@@ -60,13 +72,19 @@
     success, so a failed MSI does not get its evidence deleted.
 
 .PARAMETER DnsCleanup
-    Clean (default) or Report. Controls whether loopback DNS servers are stripped
-    from adapters after removal. Clean is downgraded to Report automatically while
-    any agent product or service remains.
+    Clean (default) or Report. Controls whether dead resolver addresses are
+    stripped from adapters. Clean is downgraded to Report automatically while any
+    agent product or service remains.
+
+.PARAMETER ResidueDnsAddresses
+    Addresses this agent is known to have written to an adapter. Loopback is always
+    treated as residue. Default 127.0.0.1, 127.0.0.2, 172.0.0.2. Anything outside
+    loopback must match exactly - there is no range matching, so a site's real
+    resolver is never removed. Add a build's address here if you meet a new one.
 
 .PARAMETER TestOnly
     Report every agent found, where it was found, its version and the recipe that
-    would be used. Changes nothing.
+    would be used. Changes nothing, including DNS.
 
 .PARAMETER FullMsiLog
     Echo the whole msiexec log instead of the digest. Noisy; use when support asks
@@ -79,7 +97,11 @@
     Transcript log. Default %ProgramData%\iTech\Logs\DNSFilter-Uninstall-<host>.log
 
 .EXAMPLE
-    # Standard RMM task: remove whatever agent is present, both kinds, clean DNS
+    # Standard RMM task: remove whatever agent is present, both kinds, repair DNS
+    .\Uninstall-DNSFilterAgent.ps1
+
+.EXAMPLE
+    # Broken endpoint, agent already gone: just fix the adapter
     .\Uninstall-DNSFilterAgent.ps1
 
 .EXAMPLE
@@ -91,8 +113,8 @@
     .\Uninstall-DNSFilterAgent.ps1 -RegClean:$false
 
 .EXAMPLE
-    # Stuck agent: force the cleanup even if msiexec fails
-    .\Uninstall-DNSFilterAgent.ps1 -ForceCleanup -FullMsiLog
+    # A build that left a different address behind
+    .\Uninstall-DNSFilterAgent.ps1 -ResidueDnsAddresses '127.0.0.1','172.0.0.2','172.0.0.9'
 
 .NOTES
     Run as SYSTEM. Removes both the modern 'DNSFilter Agent' and the legacy
@@ -107,6 +129,8 @@
     HKCU tray-icon residue belongs to the logged-on user profile, not SYSTEM, so it
     is reported rather than silently rewritten.
     Exit codes: 0 = ok, 1 = failed/residue, 2 = parameter/prerequisite problem.
+    Repair-only runs report not-installed, not-installed-dns-repaired or
+    not-installed-dns-failed.
 
 .LINK
     https://help.dnsfilter.com/hc/en-us/articles/34957633714707-Uninstall-Windows-Roaming-Client-v2-0-1-or-higher
@@ -125,6 +149,8 @@ param(
 
     [ValidateSet('Clean', 'Report')]
     [string]$DnsCleanup = 'Clean',
+
+    [string[]]$ResidueDnsAddresses = @('127.0.0.1', '127.0.0.2', '172.0.0.2'),
 
     [switch]$TestOnly,
 
@@ -155,6 +181,15 @@ $script:KnownProductCodes = @(
 )
 
 $script:ServiceNames = @('DNSFilter Agent', 'DNS Agent')
+
+# Validate the residue addresses once so a typo cannot silently disable detection.
+$script:ResidueDnsAddresses = @()
+foreach ($candidate in $ResidueDnsAddresses) {
+    $parsed = $null
+    if ([System.Net.IPAddress]::TryParse([string]$candidate, [ref]$parsed)) {
+        $script:ResidueDnsAddresses += $parsed.ToString()
+    }
+}
 
 $script:Result = [ordered]@{
     script      = 'Uninstall-DNSFilterAgent'
@@ -711,8 +746,25 @@ function Remove-AgentResidue {
     return [pscustomobject]@{ Removed = $removed; Failed = $failed }
 }
 
+function Test-ResidueDnsServer {
+    # True when an adapter's DNS server is an address this agent left behind.
+    # Loopback is never a valid upstream resolver, so all of 127.0.0.0/8 counts.
+    # Everything else must match the known list EXACTLY: a broad 172.16.0.0/12
+    # rule would happily delete a resolver a site is legitimately using, which is
+    # a worse outage than the one being fixed.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Address)
+    if ([string]::IsNullOrWhiteSpace($Address)) { return $false }
+    $candidate = $Address.Trim()
+    if ($candidate -match '^127\.') { return $true }
+    foreach ($known in $script:ResidueDnsAddresses) {
+        if ($candidate -eq $known) { return $true }
+    }
+    return $false
+}
+
 function Repair-LoopbackDns {
-    # The agent points adapters at 127.0.0.1. Left behind, that adapter has no DNS.
+    # The agent points adapters at a dead local address. Left behind, that adapter
+    # has no working DNS - the endpoint drops off the network.
     param([ValidateSet('Clean', 'Report')][string]$Mode)
     $results = @()
     $adapters = @()
@@ -721,7 +773,7 @@ function Repair-LoopbackDns {
     } catch {
         $message = $_.Exception.Message
         Write-Log -Level WARN -Message ('Could not enumerate adapters: {0}' -f $message)
-        # Without an adapter list this run cannot tell whether loopback DNS was
+        # Without an adapter list this run cannot tell whether a dead resolver was
         # left behind. Under Clean that is an uninspected endpoint, not a success;
         # under Report nothing was going to change anyway.
         if ($Mode -eq 'Report') { return $results }
@@ -729,6 +781,7 @@ function Repair-LoopbackDns {
             Adapter = '(enumeration)'
             Before  = ''
             After   = ''
+            Removed = ''
             Action  = ('failed:' + $message)
         })
     }
@@ -744,6 +797,7 @@ function Repair-LoopbackDns {
                     Adapter = $adapter.Name
                     Before  = '(unreadable)'
                     After   = ''
+                    Removed = ''
                     Action  = ('failed:' + $message)
                 }
             }
@@ -751,10 +805,10 @@ function Repair-LoopbackDns {
         }
         $servers = @($config.ServerAddresses)
         if ($servers.Count -eq 0) { continue }
-        $loopback = @($servers | Where-Object { $_ -match '^127\.' })
-        if ($loopback.Count -eq 0) { continue }
+        $stale = @($servers | Where-Object { Test-ResidueDnsServer -Address $_ })
+        if ($stale.Count -eq 0) { continue }
 
-        $keep = @($servers | Where-Object { $_ -notmatch '^127\.' })
+        $keep = @($servers | Where-Object { -not (Test-ResidueDnsServer -Address $_) })
         $action = if ($Mode -eq 'Report') { 'reported' } else { 'pending' }
         if ($Mode -eq 'Clean') {
             try {
@@ -773,10 +827,21 @@ function Repair-LoopbackDns {
         try {
             $after = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses)
         } catch { }
+        # Read it back: a set that reported success but left the dead address in
+        # place is exactly the endpoint that lost connectivity in the field, so it
+        # must not be recorded as repaired. An empty read-back is fine - a DHCP
+        # reset legitimately leaves no static servers registered.
+        if ($Mode -eq 'Clean' -and $action -notlike 'failed*') {
+            $survivors = @($after | Where-Object { Test-ResidueDnsServer -Address $_ })
+            if ($survivors.Count -gt 0) {
+                $action = 'failed:still-present:' + ($survivors -join ',')
+            }
+        }
         $results += [pscustomobject]@{
             Adapter = $adapter.Name
             Before  = ($servers -join ',')
             After   = ($after -join ',')
+            Removed = ($stale -join ',')
             Action  = $action
         }
         $logLevel = if ($action -like 'failed*') { 'WARN' } else { 'OK' }
@@ -801,6 +866,43 @@ function Invoke-Removal {
         $script:Result.action = 'none'
         $script:Result.status = 'not-installed'
         $script:ExitCode = 0
+
+        # The endpoint this script exists for often has no agent left: the uninstall
+        # succeeded long ago and the adapter still points at the dead address, which is
+        # what breaks connectivity. With no agent present that address is dead weight,
+        # so repairing it is safe - and it is the whole reason to run this tool on that
+        # machine. Nothing is touched unless a residue address is actually configured
+        # on an adapter, so a healthy endpoint is left exactly as it is.
+        if (-not $TestOnly) {
+            $repairMode = if ($DnsCleanup -eq 'Clean') { 'Clean' } else { 'Report' }
+            $script:Result.dnsMode = $repairMode
+            $dnsResults = @(Repair-LoopbackDns -Mode $repairMode)
+            $script:Result.dns = @($dnsResults)
+
+            # Two very different failures. Residue found but not cleared is a broken
+            # endpoint and must go red. An adapter that could not be read on a machine
+            # with no agent and no residue is a reporting gap, not a failed removal, so
+            # it warns without failing a fleet-wide task that had nothing to do here.
+            $stillBroken = @($dnsResults | Where-Object { $_.Action -like 'failed:still-present*' })
+            $uninspected = @($dnsResults | Where-Object { $_.Action -like 'failed:*' -and $_.Action -notlike 'failed:still-present*' })
+            $repaired    = @($dnsResults | Where-Object { $_.Action -eq 'loopback-removed' -or $_.Action -eq 'reset-to-dhcp' })
+
+            if ($repaired.Count -gt 0) {
+                $script:Result.status = 'not-installed-dns-repaired'
+                $script:Result.detail = ('repaired {0} adapter(s)' -f $repaired.Count)
+                Write-Log -Level OK -Message ('No agent to remove, but {0} adapter(s) had the dead resolver removed.' -f $repaired.Count)
+            }
+            if ($stillBroken.Count -gt 0) {
+                $script:Result.residue = @('dns-cleanup-failed')
+                $script:Result.status = 'not-installed-dns-failed'
+                $script:Result.detail = ('{0} adapter(s) still broken' -f $stillBroken.Count)
+                $script:ExitCode = 1
+                Write-Log -Level ERROR -Message ('{0} adapter(s) still point at the agent address after the change. Fix them manually; re-run with -DnsCleanup Report to inspect without changing anything.' -f $stillBroken.Count)
+            }
+            if ($uninspected.Count -gt 0 -and $stillBroken.Count -eq 0 -and $repaired.Count -eq 0) {
+                Write-Log -Level WARN -Message ('{0} adapter(s) could not be inspected; no agent is installed, so nothing was removed and nothing is presumed broken. Re-run with -DnsCleanup Report for detail.' -f $uninspected.Count)
+            }
+        }
         return
     }
 
@@ -928,8 +1030,8 @@ function Invoke-Removal {
     $script:Result.removed = @($removedList | Select-Object -Unique)
     $script:Result.residue = @($residueList | Select-Object -Unique)
 
-    # Removing the agent is what makes its loopback resolver wrong. While an agent is
-    # still registered or its service is still running, 127.0.0.1 is doing its job -
+    # Removing the agent is what makes its dead resolver wrong. While an agent is
+    # still registered or its service is still running, that address is doing its job -
     # stripping it would disable DNSFilter protection instead of restoring DNS. A
     # failed uninstall (1618, 1603) must therefore not reach the Clean path.
     $stillRegistered   = @($agents | Where-Object { Test-ProductRegistered -ProductCode $_.ProductCode })
@@ -937,7 +1039,7 @@ function Invoke-Removal {
     $dnsMode = $DnsCleanup
     if ($DnsCleanup -eq 'Clean' -and ($stillRegistered.Count -gt 0 -or $survivingServices.Count -gt 0)) {
         $dnsMode = 'Report'
-        Write-Log -Level WARN -Message ('DNS cleanup downgraded to report-only: {0} product(s) still registered, {1} agent service(s) still present. A running agent needs 127.0.0.1, so changing it here would break protection rather than restore DNS. Re-run once the agent is gone.' -f $stillRegistered.Count, $survivingServices.Count)
+        Write-Log -Level WARN -Message ('DNS cleanup downgraded to report-only: {0} product(s) still registered, {1} agent service(s) still present. A running agent needs its local resolver, so changing it here would break protection rather than restore DNS. Re-run once the agent is gone.' -f $stillRegistered.Count, $survivingServices.Count)
     }
     $script:Result.dnsMode = $dnsMode
     $dnsResults = Repair-LoopbackDns -Mode $dnsMode
@@ -945,12 +1047,12 @@ function Invoke-Removal {
 
     $dnsFailures = @($dnsResults | Where-Object { $_.Action -like 'failed*' })
     if ($dnsFailures.Count -gt 0) {
-        # An adapter still pointing at a loopback resolver after the agent is gone
-        # is a broken endpoint, and an adapter that could not be read is uninspected.
+        # An adapter still pointing at a dead resolver after the agent is gone is a
+        # broken endpoint, and an adapter that could not be read is uninspected.
         # Neither may report success.
         $residueList += 'dns-cleanup-failed'
         $script:Result.residue = @($residueList | Select-Object -Unique)
-        Write-Log -Level ERROR -Message ('{0} adapter(s) could not be inspected or repaired; DNS may still point at loopback.' -f $dnsFailures.Count)
+        Write-Log -Level ERROR -Message ('{0} adapter(s) could not be inspected or repaired; DNS may still point at the agent address.' -f $dnsFailures.Count)
     }
 
     if ($anyFailed -or $script:Result.residue.Count -gt 0) {
