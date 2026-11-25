@@ -186,13 +186,22 @@ $script:KnownProductCodes = @(
 $script:ServiceNames = @('DNSFilter Agent', 'DNS Agent')
 
 # Validate the residue addresses once so a typo cannot silently disable detection.
-$script:ResidueDnsAddresses = @()
+# Normalize into a LOCAL variable first. At script scope $script:ResidueDnsAddresses
+# and the -ResidueDnsAddresses parameter are the SAME variable, so clearing or
+# appending to the script-scope copy before this loop reads the parameter empties the
+# supplied list - leaving Test-ResidueDnsServer with nothing but the hard-coded
+# loopback range, which silently disables detection of 172.0.0.2 and anything custom.
+$normalizedResidueAddresses = @()
 foreach ($candidate in $ResidueDnsAddresses) {
     $parsed = $null
     if ([System.Net.IPAddress]::TryParse([string]$candidate, [ref]$parsed)) {
-        $script:ResidueDnsAddresses += $parsed.ToString()
+        $normalizedResidueAddresses += $parsed.ToString()
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace([string]$candidate)) {
+        Write-Warning ("Ignoring -ResidueDnsAddresses value '{0}': not an IP address." -f $candidate)
     }
 }
+$script:ResidueDnsAddresses = @($normalizedResidueAddresses)
 
 $script:Result = [ordered]@{
     script      = 'Uninstall-DNSFilterAgent'
