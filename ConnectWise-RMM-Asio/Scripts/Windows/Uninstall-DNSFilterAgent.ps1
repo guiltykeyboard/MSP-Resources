@@ -47,9 +47,10 @@
       172.16.0.0/12 is never removed. After changing an adapter the value is read
       back; if the dead address survived, the adapter is reported as failed rather
       than repaired. Failures are reported by kind - failed:inspect when an adapter
-      could not be read, failed:set when the change threw, and failed:still-present
-      when the dead address survived the change. A set or still-present failure
-      always fails the run.
+      could not be read, failed:set when the change threw, failed:verify when the
+      change could not be read back, and failed:still-present when the dead address
+      survived the change. A set, verify or still-present failure always fails the
+      run.
 
       A machine with no agent left at all is still worth running the script on: that
       is the broken endpoint, and the DNS repair runs there too.
@@ -782,6 +783,7 @@ function Repair-LoopbackDns {
     #   reported / loopback-removed / reset-to-dhcp  - fine
     #   failed:inspect:<why>   - an adapter could not be read (reporting gap)
     #   failed:set:<why>       - the change threw (failed repair)
+    #   failed:verify:<why>    - the change reported success but could not be read back
     #   failed:still-present:<addr> - the dead address survived the change
     param([ValidateSet('Clean', 'Report')][string]$Mode)
     $results = @()
@@ -845,17 +847,27 @@ function Repair-LoopbackDns {
             }
         }
         $after = @()
+        $readBackError = $null
         try {
             $after = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses)
-        } catch { }
+        } catch {
+            # A read-back that throws is NOT an empty DNS list. This adapter was
+            # already confirmed to hold a residue address, so a set that cannot be
+            # verified is an unverified repair, not a successful one.
+            $readBackError = $_.Exception.Message
+        }
         # Read it back: a set that reported success but left the dead address in
         # place is exactly the endpoint that lost connectivity in the field, so it
         # must not be recorded as repaired. An empty read-back is fine - a DHCP
         # reset legitimately leaves no static servers registered.
         if ($Mode -eq 'Clean' -and $action -notlike 'failed*') {
-            $survivors = @($after | Where-Object { Test-ResidueDnsServer -Address $_ })
-            if ($survivors.Count -gt 0) {
-                $action = 'failed:still-present:' + ($survivors -join ',')
+            if ($readBackError) {
+                $action = 'failed:verify:' + $readBackError
+            } else {
+                $survivors = @($after | Where-Object { Test-ResidueDnsServer -Address $_ })
+                if ($survivors.Count -gt 0) {
+                    $action = 'failed:still-present:' + ($survivors -join ',')
+                }
             }
         }
         $results += [pscustomobject]@{
@@ -905,7 +917,7 @@ function Invoke-Removal {
             # on a machine with no agent and no residue is a reporting gap, not a
             # failed removal, so it warns without failing a fleet-wide task that had
             # nothing to do here.
-            $stillBroken = @($dnsResults | Where-Object { $_.Action -like 'failed:set:*' -or $_.Action -like 'failed:still-present:*' })
+            $stillBroken = @($dnsResults | Where-Object { $_.Action -like 'failed:set:*' -or $_.Action -like 'failed:verify:*' -or $_.Action -like 'failed:still-present:*' })
             $uninspected = @($dnsResults | Where-Object { $_.Action -like 'failed:inspect:*' })
             $repaired    = @($dnsResults | Where-Object { $_.Action -eq 'loopback-removed' -or $_.Action -eq 'reset-to-dhcp' })
 
