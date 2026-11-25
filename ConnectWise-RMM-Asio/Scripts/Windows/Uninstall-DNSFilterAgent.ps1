@@ -91,6 +91,9 @@
 .NOTES
     Run as SYSTEM. Removes both the modern 'DNSFilter Agent' and the legacy
     whitelabel 'DNS Agent', so a machine carrying both ends up clean.
+    Residue cleanup is deferred until every removal attempt has finished and is
+    scoped to the products that were actually removed, so one product's success
+    cannot delete another product's files first.
     HKCU tray-icon residue belongs to the logged-on user profile, not SYSTEM, so it
     is reported rather than silently rewritten.
     Exit codes: 0 = ok, 1 = failed/residue, 2 = parameter/prerequisite problem.
@@ -513,14 +516,56 @@ function Write-MsiLogDigest {
     Write-Host '--- end digest ---'
 }
 
+function Get-ResidueTargets {
+    # Residue is per product: removing the legacy client must never delete the
+    # modern one's service, directory or registry tree. A candidate with no name
+    # (found only by its registry GUID) is ambiguous, so it covers both.
+    param([Parameter(Mandatory)]$Agent)
+    $branded = [bool]($Agent.Name -match 'DNSFilter')
+    $legacy  = [bool]($Agent.Name -match 'Agent' -and $Agent.Name -notmatch 'DNSFilter')
+    if (-not $branded -and -not $legacy) { $branded = $true; $legacy = $true }
+
+    $targets = [pscustomobject]@{ Services = @(); Directories = @(); Keys = @() }
+    if ($branded) {
+        $targets.Services    += 'DNSFilter Agent'
+        if ($env:ProgramFiles) { $targets.Directories += (Join-Path $env:ProgramFiles 'DNSFilter Agent') }
+        if ($env:ProgramData)  { $targets.Directories += (Join-Path $env:ProgramData 'DNSFilter, Inc') }
+        $targets.Keys        += 'SOFTWARE\DNSFilter'
+    }
+    if ($legacy) {
+        $targets.Services    += 'DNS Agent'
+        if ($env:ProgramFiles) { $targets.Directories += (Join-Path $env:ProgramFiles 'DNS Agent') }
+        if ($env:ProgramData)  { $targets.Directories += (Join-Path $env:ProgramData 'DNS Agent') }
+        $targets.Keys        += 'SOFTWARE\DNSAgent'
+    }
+    return $targets
+}
+
 function Remove-AgentResidue {
-    # Service, directories and registry keys. Only called when the removal
-    # succeeded, or when -ForceCleanup says the operator accepts the risk.
-    param([switch]$IncludeDirectories)
+    # Service, directories and registry keys for the products named in -Agents.
+    # Called once, after every removal attempt, so one product's success cannot
+    # clear another product's files first.
+    param(
+        [Parameter(Mandatory)][object[]]$Agents,
+        [switch]$PreserveConfig
+    )
     $removed = @()
     $failed  = @()
 
-    foreach ($name in $script:ServiceNames) {
+    $services = @()
+    $dirs     = @()
+    $keys     = @()
+    foreach ($agent in $Agents) {
+        $targets  = Get-ResidueTargets -Agent $agent
+        $services += $targets.Services
+        $dirs     += $targets.Directories
+        $keys     += $targets.Keys
+    }
+    $services = @($services | Select-Object -Unique)
+    $dirs     = @($dirs | Select-Object -Unique)
+    $keys     = @($keys | Select-Object -Unique)
+
+    foreach ($name in $services) {
         try {
             $svc = Get-Service -Name $name -ErrorAction Stop
             if ($svc.Status -eq 'Running') {
@@ -539,38 +584,43 @@ function Remove-AgentResidue {
         } catch { }
     }
 
-    if ($IncludeDirectories) {
-        foreach ($path in (Get-AgentDirectories)) {
-            try {
-                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
-                Write-Log -Level OK -Message ('Removed leftover directory: {0}' -f $path)
-                $removed += ('dir:' + $path)
-            } catch {
-                Write-Log -Level WARN -Message ('Could not remove {0}: {1}' -f $path, $_.Exception.Message)
-                $failed += ('dir:' + $path)
-            }
+    foreach ($path in $dirs) {
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        try {
+            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+            Write-Log -Level OK -Message ('Removed leftover directory: {0}' -f $path)
+            $removed += ('dir:' + $path)
+        } catch {
+            Write-Log -Level WARN -Message ('Could not remove {0}: {1}' -f $path, $_.Exception.Message)
+            $failed += ('dir:' + $path)
         }
     }
 
-    foreach ($view in @('Registry64', 'Registry32')) {
-        $base = Open-RegistryView -View $view
-        if (-not $base) { continue }
-        try {
-            foreach ($keyPath in @('SOFTWARE\DNSFilter', 'SOFTWARE\DNSAgent')) {
-                try {
-                    $key = $base.OpenSubKey($keyPath, $true)
-                    if ($key) {
-                        $key.Dispose()
-                        $base.DeleteSubKeyTree($keyPath)
-                        Write-Log -Level OK -Message ('Removed leftover registry key: HKLM\{0} ({1})' -f $keyPath, $view)
-                        $removed += ('key:' + $keyPath + ':' + $view)
-                    }
-                } catch { }
+    if ($PreserveConfig) {
+        # -RegClean False asked the MSI to keep the agent's registry state, so the
+        # script must not delete the tree the MSI was told to preserve.
+        Write-Log -Message ('Keeping configuration keys ({0}) because -RegClean False was requested.' -f ($keys -join ', '))
+    } else {
+        foreach ($view in @('Registry64', 'Registry32')) {
+            $base = Open-RegistryView -View $view
+            if (-not $base) { continue }
+            try {
+                foreach ($keyPath in $keys) {
+                    try {
+                        $key = $base.OpenSubKey($keyPath, $true)
+                        if ($key) {
+                            $key.Dispose()
+                            $base.DeleteSubKeyTree($keyPath)
+                            Write-Log -Level OK -Message ('Removed leftover registry key: HKLM\{0} ({1})' -f $keyPath, $view)
+                            $removed += ('key:' + $keyPath + ':' + $view)
+                        }
+                    } catch { }
+                }
+            } catch {
+                Write-Log -Level WARN -Message ('Registry cleanup error in {0}: {1}' -f $view, $_.Exception.Message)
+            } finally {
+                $base.Dispose()
             }
-        } catch {
-            Write-Log -Level WARN -Message ('Registry cleanup error in {0}: {1}' -f $view, $_.Exception.Message)
-        } finally {
-            $base.Dispose()
         }
     }
 
@@ -664,6 +714,7 @@ function Invoke-Removal {
     $removedList = @()
     $residueList = @()
     $anyFailed = $false
+    $removedAgents = @()
 
     foreach ($agent in $agents) {
         $useRegClean = switch ($RegClean) {
@@ -693,22 +744,10 @@ function Invoke-Removal {
         if (-not $outcome.Ok) {
             $anyFailed = $true
             Write-Log -Level ERROR -Message ('Removal failed for {0} ({1})' -f $agent.Name, $agent.ProductCode)
-        }
-
-        $cleanup = $false
-        if ($outcome.Ok) { $cleanup = $true }
-        elseif ($ForceCleanup) {
-            $cleanup = $true
-            Write-Log -Level WARN -Message '-ForceCleanup set: cleaning residue even though msiexec failed.'
-        }
-
-        $residue = $null
-        if ($cleanup) {
-            $residue = Remove-AgentResidue -IncludeDirectories:$true
-            $removedList += $residue.Removed
-            $residueList += $residue.Failed
-        } else {
-            Write-Log -Level WARN -Message 'Left residue in place because the removal failed. Re-run with -ForceCleanup to remove it anyway.'
+        } elseif ($code -ne 1605) {
+            # 1605 means the product was not registered, so nothing was removed and
+            # this candidate must not authorise a residue pass for anything.
+            $removedAgents += $agent
         }
 
         # Verify: is the product still registered anywhere we can see?
@@ -735,6 +774,25 @@ function Invoke-Removal {
         $script:WorkDir = $null
     }
 
+    # Residue pass runs once, after every removal attempt, and only for products
+    # that were actually removed - unless -ForceCleanup explicitly accepts the
+    # risk for products that failed.
+    $cleanupAgents = @($removedAgents)
+    if ($ForceCleanup) {
+        $cleanupAgents = @($agents)
+        Write-Log -Level WARN -Message '-ForceCleanup set: residue will be cleared for every detected product, including any that failed to uninstall.'
+    }
+
+    if ($cleanupAgents.Count -gt 0) {
+        $residue = Remove-AgentResidue -Agents $cleanupAgents -PreserveConfig:($RegClean -eq 'False')
+        $removedList += $residue.Removed
+        $residueList += $residue.Failed
+    } elseif ($anyFailed) {
+        Write-Log -Level WARN -Message 'Left residue in place because every removal failed. Re-run with -ForceCleanup to remove it anyway.'
+    } else {
+        Write-Log -Message 'No product was actually removed (all reports were "not installed"), so residue cleanup was skipped.'
+    }
+
     # Leftover HKCU tray icons belong to the logged-on user, not to SYSTEM.
     $trayKeys = @(
         'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunNotification\StartupTNotiDNSFilter Agent TrayIcon',
@@ -751,6 +809,15 @@ function Invoke-Removal {
 
     $dnsResults = Repair-LoopbackDns -Mode $DnsCleanup
     $script:Result.dns = @($dnsResults)
+
+    $dnsFailures = @($dnsResults | Where-Object { $_.Action -like 'failed*' })
+    if ($dnsFailures.Count -gt 0) {
+        # An adapter still pointing at a loopback resolver after the agent is gone
+        # is a broken endpoint, so it must not report success.
+        $residueList += 'dns-cleanup-failed'
+        $script:Result.residue = @($residueList | Select-Object -Unique)
+        Write-Log -Level ERROR -Message ('{0} adapter(s) could not be repaired; DNS may still point at loopback.' -f $dnsFailures.Count)
+    }
 
     if ($anyFailed -or $script:Result.residue.Count -gt 0) {
         $script:Result.status = if ($anyFailed) { 'failed' } else { 'removed-with-residue' }
