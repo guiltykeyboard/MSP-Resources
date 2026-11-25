@@ -30,9 +30,15 @@
 
     IDEMPOTENCY
       An existing agent (modern 'DNSFilter Agent' or legacy whitelabel 'DNS Agent')
-      is detected and left alone. -Force repairs or re-keys it, -Uninstall removes
-      it by its Add/Remove Programs product code, -TestOnly reports the plan and
-      changes nothing.
+      is detected in both registry views and left alone. -Force repairs or re-keys
+      it, -Uninstall removes it by its Add/Remove Programs product code, -TestOnly
+      reports the plan and changes nothing.
+
+    SAFETY
+      -TestOnly is evaluated before any mutating path, so '-Uninstall -TestOnly' is
+      a pre-flight that removes nothing. Reporting and the exit code are emitted at
+      a single exit point that every completion path reaches, so RMM never reads a
+      failed run as green.
 
     OUTPUT
       One-line JSON on STDOUT for RMM parsing.
@@ -60,10 +66,12 @@
 
 .PARAMETER Uninstall
     Remove the agent by product code and exit. No token required.
+    With -TestOnly it reports what would be removed and removes nothing.
 
 .PARAMETER TestOnly
     Report resolved architecture, package URL, token state and installed product.
-    Downloads and installs nothing.
+    Downloads, installs and uninstalls nothing. Evaluated before every mutating
+    path.
 
 .PARAMETER ProbeLocalResolver
     After a successful install, resolve dnsfilter.com against 127.0.0.1 and record
@@ -91,11 +99,17 @@
     # Remove the agent (detects modern and legacy whitelabel builds)
     .\Deploy-DNSFilterAgent.ps1 -Uninstall
 
+.EXAMPLE
+    # Pre-flight an uninstall: reports what would be removed, changes nothing
+    .\Deploy-DNSFilterAgent.ps1 -Uninstall -TestOnly
+
 .NOTES
     Target: Windows 10/11 and Server 2016+ on x64 and ARM64. Windows Installer
     handles the ARM64 MSI natively on Windows 11 ARM64.
     Site keys are alphanumeric; anything with quotes, spaces or backslashes is
     rejected before it reaches a command line.
+    Add/Remove Programs is read through both registry views explicitly, so a 32-bit
+    PowerShell host still sees a native x64 or ARM64 agent.
     Exit codes: 0 = ok, 1 = install failed, 2 = parameter/prerequisite problem.
 
 .LINK
@@ -221,26 +235,65 @@ function Get-OsArchitecture {
     return $null
 }
 
-function Get-InstalledAgent {
-    # Scan Add/Remove Programs for the modern or legacy whitelabel agent.
-    $roots = @(
-        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
-        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+function Get-UninstallEntries {
+    # Read one registry view explicitly. A 32-bit PowerShell host is redirected for
+    # HKLM:\SOFTWARE, so the provider path alone would hide a native agent; opening
+    # the views by name is the only reliable way to see both.
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Registry64', 'Registry32')]
+        [string]$View
     )
-    foreach ($root in $roots) {
-        if (-not (Test-Path -LiteralPath $root)) { continue }
-        foreach ($key in (Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
-            $props = $null
-            try { $props = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop } catch { continue }
-            if (-not $props.DisplayName) { continue }
-            $name = [string]$props.DisplayName
-            if ($name -notmatch 'DNSFilter|DNS\s*Agent') { continue }
+    $subKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+    $base   = $null
+    $root   = $null
+    try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $View)
+        $root = $base.OpenSubKey($subKey)
+        if (-not $root) { return @() }
+        $found = @()
+        foreach ($name in $root.GetSubKeyNames()) {
+            $child = $null
+            try {
+                $child = $root.OpenSubKey($name)
+                if (-not $child) { continue }
+                $display = $child.GetValue('DisplayName')
+                if (-not $display) { continue }
+                $found += [pscustomobject]@{
+                    Name        = [string]$display
+                    Version     = [string]$child.GetValue('DisplayVersion')
+                    Publisher   = [string]$child.GetValue('Publisher')
+                    ProductCode = $name
+                    View        = $View
+                }
+            } catch {
+                continue
+            } finally {
+                if ($child) { $child.Dispose() }
+            }
+        }
+        return $found
+    } catch {
+        # View unavailable (a 32-bit OS has no Registry64) - nothing to report.
+        return @()
+    } finally {
+        if ($root) { $root.Dispose() }
+        if ($base) { $base.Dispose() }
+    }
+}
+
+function Get-InstalledAgent {
+    # Scan Add/Remove Programs, both registry views, for the modern or legacy agent.
+    foreach ($view in @('Registry64', 'Registry32')) {
+        foreach ($entry in (Get-UninstallEntries -View $view)) {
+            if ($entry.Name -notmatch 'DNSFilter|DNS\s*Agent') { continue }
             # Exclude unrelated "DNS Agent" products by requiring the vendor name.
-            if ($name -notmatch 'DNSFilter' -and ([string]$props.Publisher) -notmatch 'DNSFilter') { continue }
+            if ($entry.Name -notmatch 'DNSFilter' -and $entry.Publisher -notmatch 'DNSFilter') { continue }
             return [pscustomobject]@{
-                Name        = $name
-                Version     = [string]$props.DisplayVersion
-                ProductCode = $key.PSChildName
+                Name        = $entry.Name
+                Version     = $entry.Version
+                ProductCode = $entry.ProductCode
+                View        = $entry.View
             }
         }
     }
@@ -339,12 +392,9 @@ function New-StagingDirectory {
 }
 
 # --------------------------------------------------------------------------
-# Main
+# Main workflow
 # --------------------------------------------------------------------------
-$msiExitCode = $null
-$stagePath   = $null
-
-try {
+function Invoke-Deployment {
     Write-Log -Level INFO -Message ('=== Deploy-DNSFilterAgent {0} on {1} ({2}/{3}) ===' -f $commitDisplay, $env:COMPUTERNAME, $env:PROCESSOR_ARCHITECTURE, $env:PROCESSOR_ARCHITEW6432)
 
     if (-not [Environment]::Is64BitOperatingSystem) {
@@ -356,6 +406,7 @@ try {
     }
 
     # ---- architecture ----
+    $detected = $null
     if ($Architecture -eq 'Auto') {
         $detected = Get-OsArchitecture
         if (-not $detected) {
@@ -372,6 +423,7 @@ try {
     # ---- site token ----
     $tokenState = 'parameter'
     if ($Uninstall) {
+        # Uninstall never needs the key, so a pre-flight of it must not demand one.
         $tokenState = 'not-required'
     } else {
         if ([string]::IsNullOrWhiteSpace($SiteToken) -or $SiteToken -match '^@[^@]+@$') {
@@ -410,15 +462,34 @@ try {
     $installed = Get-InstalledAgent
     $service   = Get-AgentService
     if ($installed) {
-        Write-Log -Message ('Existing agent: {0} {1} (product code {2})' -f $installed.Name, $installed.Version, $installed.ProductCode)
+        Write-Log -Message ('Existing agent: {0} {1} (product code {2}, {3})' -f $installed.Name, $installed.Version, $installed.ProductCode, $installed.View)
         $script:Result.product = $installed.Name
         $script:Result.version = $installed.Version
     } else {
-        Write-Log -Message 'No existing DNSFilter agent found in Add/Remove Programs.'
+        Write-Log -Message 'No existing DNSFilter agent found in Add/Remove Programs (both registry views).'
     }
     if ($service) {
         Write-Log -Message ('Agent service: {0}' -f $service)
         $script:Result.service = $service
+    }
+
+    # ---- pre-flight: evaluated BEFORE any mutating path ----
+    if ($TestOnly) {
+        $script:Result.action = 'preflight'
+        $script:Result.status = 'preflight-ok'
+        $script:ExitCode = 0
+        if ($Uninstall) {
+            if ($installed) {
+                Write-Log -Level OK -Message ('Pre-flight only. Would uninstall {0} {1} (product code {2}). Nothing was changed.' -f $installed.Name, $installed.Version, $installed.ProductCode)
+            } else {
+                Write-Log -Level OK -Message 'Pre-flight only. No agent is installed, so an uninstall run would report nothing to remove. Nothing was changed.'
+            }
+            return
+        }
+        Write-Log -Level OK -Message ('Pre-flight only. Would install {0}. Nothing was changed.' -f $packageUrl)
+        if ($installed -and -not $Force) { Write-Log -Message 'An agent is already present; a real run would exit 0 without reinstalling.' }
+        if ($installed -and $Force) { Write-Log -Message 'An agent is present and -Force is set; a real run would repair it with the supplied key.' }
+        return
     }
 
     # ---- uninstall path ----
@@ -431,29 +502,22 @@ try {
             return
         }
         $script:WorkDir = New-StagingDirectory
-        $stagePath = $script:WorkDir
-        $uninstallLog = Join-Path $script:WorkDir 'msiexec.log'
+        $uninstallLog  = Join-Path $script:WorkDir 'msiexec.log'
         $uninstallArgs = '/x "{0}" /qn /norestart /l*v "{1}"' -f $installed.ProductCode, $uninstallLog
         Write-Log -Message ('Uninstalling {0} {1}' -f $installed.Name, $installed.Version)
-        $msiExitCode = Invoke-Msi -Arguments $uninstallArgs
-        $outcome = Get-MsiOutcome -Code $msiExitCode
-        $script:Result.action = 'uninstall'
-        $script:Result.msiExit = $msiExitCode
-        $script:Result.status = if ($outcome.Ok) { 'uninstalled' } else { 'uninstall-failed' }
-        $script:Result.detail = $outcome.Note
-        if ($outcome.Ok) { Write-Log -Level OK -Message ('Uninstall complete: {0}' -f $outcome.Note) }
-        else { Write-Log -Level ERROR -Message ('Uninstall failed: {0}' -f $outcome.Note) }
-        return
-    }
-
-    # ---- test-only path ----
-    if ($TestOnly) {
-        Write-Log -Level OK -Message ('Pre-flight only. Would install {0}' -f $packageUrl)
-        if ($installed -and -not $Force) { Write-Log -Message 'An agent is already present; a real run would exit 0 without reinstalling.' }
-        if ($installed -and $Force) { Write-Log -Message 'An agent is present and -Force is set; a real run would repair it with the supplied key.' }
-        $script:Result.action = 'preflight'
-        $script:Result.status = 'preflight-ok'
-        $script:ExitCode = 0
+        $code    = Invoke-Msi -Arguments $uninstallArgs
+        $outcome = Get-MsiOutcome -Code $code
+        $script:Result.action  = 'uninstall'
+        $script:Result.msiExit = $code
+        $script:Result.status  = if ($outcome.Ok) { 'uninstalled' } else { 'uninstall-failed' }
+        $script:Result.detail  = $outcome.Note
+        if ($outcome.Ok) {
+            Write-Log -Level OK -Message ('Uninstall complete: {0}' -f $outcome.Note)
+            $script:ExitCode = 0
+        } else {
+            Write-Log -Level ERROR -Message ('Uninstall failed: {0}' -f $outcome.Note)
+            $script:ExitCode = 1
+        }
         return
     }
 
@@ -468,7 +532,6 @@ try {
 
     # ---- download ----
     $script:WorkDir = New-StagingDirectory
-    $stagePath = $script:WorkDir
     $msiName = 'DNSFilter-Agent-Setup-{0}{1}.msi' -f $Architecture, $versionSuffix
     $msiPath = Join-Path $script:WorkDir $msiName
     Write-Log -Message ('Staging in {0}' -f $script:WorkDir)
@@ -491,20 +554,21 @@ try {
     }
 
     # ---- install ----
-    $msiLog = Join-Path $script:WorkDir 'msiexec.log'
+    $msiLog      = Join-Path $script:WorkDir 'msiexec.log'
     $installArgs = '/i "{0}" /qn /norestart /l*v "{1}" NKEY="{2}"' -f $msiPath, $msiLog, $SiteToken
     if ($installed -and $Force) { $installArgs = $installArgs + ' REINSTALL=ALL REINSTALLMODE=vomus' }
     $action = if ($installed) { 'repair' } else { 'install' }
     Write-Log -Message ('Running msiexec {0} (action: {1})' -f $msiName, $action)
-    $msiExitCode = Invoke-Msi -Arguments $installArgs
-    $outcome = Get-MsiOutcome -Code $msiExitCode
-    $script:Result.action = $action
-    $script:Result.msiExit = $msiExitCode
-    $script:Result.detail = $outcome.Note
+    $code    = Invoke-Msi -Arguments $installArgs
+    $outcome = Get-MsiOutcome -Code $code
+    $script:Result.action  = $action
+    $script:Result.msiExit = $code
+    $script:Result.detail  = $outcome.Note
     if (-not $outcome.Ok) {
         Write-Log -Level ERROR -Message ('Install failed: {0}' -f $outcome.Note)
         $script:Result.status = $outcome.Status
-        throw [System.OperationCanceledException]::new('install-failed')
+        $script:ExitCode = 1
+        return
     }
     Write-Log -Level OK -Message ('msiexec: {0}' -f $outcome.Note)
 
@@ -525,6 +589,7 @@ try {
     }
     Write-Log -Level OK -Message ('Verified: {0} {1}; service {2}' -f $after.Name, $after.Version, $service)
     $script:Result.status = $outcome.Status
+    $script:ExitCode = 0
 
     # ---- optional resolver probe ----
     if ($ProbeLocalResolver) {
@@ -544,8 +609,12 @@ try {
         }
     }
 }
+
+try {
+    Invoke-Deployment
+}
 catch [System.OperationCanceledException] {
-    # Already logged and coded; nothing further to do.
+    # Already logged and coded by the branch that aborted.
 }
 catch {
     Write-Log -Level ERROR -Message ('Unhandled failure: {0}' -f $_.Exception.Message)
@@ -554,8 +623,8 @@ catch {
     $script:ExitCode = 1
 }
 finally {
-    if ($stagePath -and (Test-Path -LiteralPath $stagePath)) {
-        $msiLogPath = Join-Path $stagePath 'msiexec.log'
+    if ($script:WorkDir -and (Test-Path -LiteralPath $script:WorkDir)) {
+        $msiLogPath = Join-Path $script:WorkDir 'msiexec.log'
         if (Test-Path -LiteralPath $msiLogPath) {
             try {
                 $logDir = Split-Path -Parent $LogPath
@@ -567,15 +636,17 @@ finally {
                 Write-Log -Level WARN -Message ('Could not preserve the msiexec log: {0}' -f $_.Exception.Message)
             }
         }
-        Remove-Item -LiteralPath $stagePath -Recurse -Force -ErrorAction SilentlyContinue
-        if (Test-Path -LiteralPath $stagePath) {
-            Write-Log -Level WARN -Message ('Staging folder still present: {0}' -f $stagePath)
+        Remove-Item -LiteralPath $script:WorkDir -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $script:WorkDir) {
+            Write-Log -Level WARN -Message ('Staging folder still present: {0}' -f $script:WorkDir)
         } else {
-            Write-Log -Message ('Staging folder removed: {0}' -f $stagePath)
+            Write-Log -Message ('Staging folder removed: {0}' -f $script:WorkDir)
         }
     }
 }
 
+# Single exit point: every completion path reaches this, so the JSON summary is
+# always emitted and the exit code is always propagated.
 $script:Result.exitCode = $script:ExitCode
 $script:Result | ConvertTo-Json -Compress -Depth 4
 exit $script:ExitCode
