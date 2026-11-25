@@ -32,8 +32,10 @@ So the script detects the version per agent and picks the recipe:
 - **legacy** (`< 2.0.1`) - the same command without `REGCLEAN`, then a residue pass
 - **unknown** - same as legacy (no `REGCLEAN`) and the log is kept for support
 
-`-RegClean True` forces it on, `-RegClean:$false` forces it off (keeps the agent's
-registry state, useful when re-keying a site).
+`-RegClean True` forces it on, `-RegClean:$false` forces it off. **With
+`-RegClean:$false` the residue pass keeps the `SOFTWARE\DNSFilter` and
+`SOFTWARE\DNSAgent` configuration trees**, so the script cannot contradict the MSI's
+instruction to preserve the agent's registry state.
 
 ## Why Add/Remove Programs alone is not enough
 
@@ -56,9 +58,25 @@ installed" and leaves the client running. Detection therefore unions four source
 Querying that class makes Windows Installer run a consistency check against every
 installed product, which is slow and can kick off repairs on unrelated software.
 
+## Residue cleanup runs once, per product
+
+Every agent is removed first; the residue pass runs afterwards, once, over the
+products that were **actually removed**. Services, directories and registry trees
+are mapped per product, so clearing out a legacy `DNS Agent` can never delete the
+modern `DNSFilter Agent`'s service or files.
+
+Two deliberate limits:
+
+- An agent that reports **1605 (product not registered)** changed nothing, so it
+  does not authorise a residue pass - that is how an absent fallback candidate
+  could otherwise delete a real agent that had not been attempted yet.
+- Residue is **not** cleared for a product whose msiexec failed, unless you pass
+  `-ForceCleanup`. A failed install is evidence; deleting it first is how you lose
+  the reason it failed.
+
 ## Getting the MSI log into the RMM output
 
-the KB's guidance is to re-run with `/L*vx!` to a local file and send it to support.
+The KB's guidance is to re-run with `/L*vx!` to a local file and send it to support.
 An RMM task cannot hand you a file, so the script always logs with `/L*vx!` to a
 temporary path, then echoes a **digest** to STDOUT - error/`Return value 3` lines,
 `Product:` lines, and the last `-LogTailLines` (default 40) lines - which lands in
@@ -77,8 +95,12 @@ for any that still list a loopback server:
 - drops the loopback entries and keeps the real servers, or
 - resets the adapter to DHCP when loopback was the only entry
 
-Every change is logged with before/after values and reported in the JSON. Use
-`-DnsCleanup Report` to list the problem without changing anything.
+Every change is logged with before/after values and reported in the JSON. A repair
+that **fails** adds `dns-cleanup-failed` to the residue list and forces exit `1`,
+because an endpoint still pointing at a dead loopback resolver is broken even
+though the agent is gone.
+
+Use `-DnsCleanup Report` to list the problem without changing anything.
 
 ## Usage
 
@@ -100,8 +122,8 @@ Every change is logged with before/after values and reported in the JSON. Use
 
 | Parameter | Default | Purpose |
 |---|---|---|
-| `-RegClean` | `Auto` | `Auto` sends `REGCLEAN=true` only for agents at v2.0.1+; `True` always, `False` never. |
-| `-ForceCleanup` | off | Remove service/directories/registry residue even after a failed msiexec. Off by default so a failure keeps its evidence. |
+| `-RegClean` | `Auto` | `Auto` sends `REGCLEAN=true` only for agents at v2.0.1+; `True` always, `False` never - and `False` also makes the residue pass keep the config keys. |
+| `-ForceCleanup` | off | Clear residue for every detected product even after a failed msiexec. Off by default so a failure keeps its evidence. |
 | `-DnsCleanup` | `Clean` | `Clean` strips loopback DNS from up adapters; `Report` only lists them. |
 | `-TestOnly` | off | List agents found, where they were found, their version and recipe. No changes. |
 | `-FullMsiLog` | off | Echo the entire msiexec log instead of the digest. |
@@ -113,7 +135,7 @@ Every change is logged with before/after values and reported in the JSON. Use
 | Code | Meaning |
 |---|---|
 | `0` | Nothing installed, or every agent removed with no residue |
-| `1` | A removal failed, or residue remains (service, directory, key, still-registered product) |
+| `1` | A removal failed, residue remains (service, directory, key, still-registered product), or a DNS repair failed |
 | `2` | Parameter or prerequisite problem |
 
 ## Status values in the JSON summary
@@ -130,21 +152,21 @@ Every change is logged with before/after values and reported in the JSON. Use
 |---|---|
 | `status: not-installed` but the client is clearly filtering | The agent is hidden from Add/Remove Programs; check the MSI database and the agent registry keys the script reports, and run `-TestOnly` to see every source it checked. |
 | msiexec `1603` | Fatal error during removal - read the digest in the RMM output, then `-FullMsiLog` for the whole thing. |
-| msiexec `1605` | Product is not registered any more; the script treats it as already removed and continues to residue cleanup. |
+| msiexec `1605` | Product is not registered any more; treated as already removed, and it does **not** trigger a residue pass. |
 | msiexec `1618` | Another installation is running; re-run the task. |
 | msiexec `1625` | Blocked by AppLocker or Software Restriction Policies. |
-| `status: removed-with-residue` | The product is gone but something survived (usually a service or the install directory). Run again, or with `-ForceCleanup`. |
+| `status: removed-with-residue` | The product is gone but something survived - a service, the install directory, or a DNS repair that failed. The `residue` array in the JSON names it. |
+| `residue: dns-cleanup-failed` | An adapter could not be moved off loopback DNS; the machine may have no working resolver. Fix DNS on that adapter by hand. |
 | `status: failed` | Removal failed and residue was deliberately left in place. Read the log, fix the cause, re-run, or accept the risk with `-ForceCleanup`. |
 | Tray icon still in the notification area | `HKCU` tray residue belongs to the logged-on user; a SYSTEM task cannot clean another user's hive. The script says so in the output instead of pretending. |
-| No DNS after removal | Re-run with `-DnsCleanup Clean`, or set the adapter's DNS manually. The script reports any adapter it could not fix. |
+| Re-keying a site | `-RegClean:$false` removes the product but keeps the config trees. |
 
 ## Notes
 
 - Run as **SYSTEM**. Both the modern **DNSFilter Agent** and the legacy whitelabel
   **DNS Agent** are removed, so a machine carrying both ends up clean.
-- Residue cleanup (service, `%ProgramFiles%`/`%ProgramData%` directories,
-  `HKLM\SOFTWARE\DNSFilter` and `HKLM\SOFTWARE\DNSAgent` in both views) runs only
-  after a successful removal, so a failed MSI is not destroyed before you read it.
+- Residue cleanup is deferred until every removal attempt has finished and scoped to
+  the products actually removed.
 - Exit codes follow the same convention as the other Windows scripts here:
   `0` ok, `1` failed, `2` parameter/prerequisite.
 
