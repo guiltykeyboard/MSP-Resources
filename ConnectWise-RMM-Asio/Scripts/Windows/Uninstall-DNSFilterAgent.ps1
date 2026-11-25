@@ -37,7 +37,8 @@
       The agent points adapters at 127.0.0.1. If a removal leaves that behind, the
       endpoint has no working DNS. -DnsCleanup Clean (default) strips loopback
       servers from active adapters and falls back to DHCP when nothing else
-      remains; Report only lists them.
+      remains; Report only lists them. A DNS pass that cannot inspect an adapter is
+      a failure, not a silent skip: an uninspected endpoint is not a clean one.
 
     OUTPUT
       One-line JSON on STDOUT plus an MSI log digest.
@@ -96,6 +97,8 @@
     cannot delete another product's files first.
     Verification asks Add/Remove Programs and the MSI database, never the agent's own
     configuration key, so a preserved config GUID is not mistaken for an install.
+    A registry key or adapter that could not be inspected is recorded as residue;
+    a run never reports success for something it failed to look at.
     HKCU tray-icon residue belongs to the logged-on user profile, not SYSTEM, so it
     is reported rather than silently rewritten.
     Exit codes: 0 = ok, 1 = failed/residue, 2 = parameter/prerequisite problem.
@@ -680,10 +683,19 @@ function Remove-AgentResidue {
                             Write-Log -Level OK -Message ('Removed leftover registry key: HKLM\{0} ({1})' -f $keyPath, $view)
                             $removed += ('key:' + $keyPath + ':' + $view)
                         }
-                    } catch { }
+                    } catch {
+                        # A restrictive ACL on a surviving subkey is the usual cause.
+                        # Swallowing it reported the run as clean while the config
+                        # tree was still there, so it becomes failed residue.
+                        Write-Log -Level WARN -Message ('Could not remove registry key HKLM\{0} ({1}): {2}' -f $keyPath, $view, $_.Exception.Message)
+                        $failed += ('key:' + $keyPath + ':' + $view)
+                    }
                 }
             } catch {
                 Write-Log -Level WARN -Message ('Registry cleanup error in {0}: {1}' -f $view, $_.Exception.Message)
+                # The view itself failed, so every key it was meant to clear is
+                # still unverified - record them rather than reporting success.
+                foreach ($keyPath in $keys) { $failed += ('key:' + $keyPath + ':' + $view) }
             } finally {
                 $base.Dispose()
             }
@@ -701,14 +713,36 @@ function Repair-LoopbackDns {
     try {
         $adapters = @(Get-NetAdapter -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' })
     } catch {
-        Write-Log -Level WARN -Message ('Could not enumerate adapters: {0}' -f $_.Exception.Message)
-        return @()
+        $message = $_.Exception.Message
+        Write-Log -Level WARN -Message ('Could not enumerate adapters: {0}' -f $message)
+        # Without an adapter list this run cannot tell whether loopback DNS was
+        # left behind. Under Clean that is an uninspected endpoint, not a success;
+        # under Report nothing was going to change anyway.
+        if ($Mode -eq 'Report') { return $results }
+        return @([pscustomobject]@{
+            Adapter = '(enumeration)'
+            Before  = ''
+            After   = ''
+            Action  = ('failed:' + $message)
+        })
     }
     foreach ($adapter in $adapters) {
         $config = $null
         try {
             $config = Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop
-        } catch { continue }
+        } catch {
+            $message = $_.Exception.Message
+            Write-Log -Level WARN -Message ('Could not read DNS servers for {0}: {1}' -f $adapter.Name, $message)
+            if ($Mode -ne 'Report') {
+                $results += [pscustomobject]@{
+                    Adapter = $adapter.Name
+                    Before  = '(unreadable)'
+                    After   = ''
+                    Action  = ('failed:' + $message)
+                }
+            }
+            continue
+        }
         $servers = @($config.ServerAddresses)
         if ($servers.Count -eq 0) { continue }
         $loopback = @($servers | Where-Object { $_ -match '^127\.' })
@@ -894,10 +928,11 @@ function Invoke-Removal {
     $dnsFailures = @($dnsResults | Where-Object { $_.Action -like 'failed*' })
     if ($dnsFailures.Count -gt 0) {
         # An adapter still pointing at a loopback resolver after the agent is gone
-        # is a broken endpoint, so it must not report success.
+        # is a broken endpoint, and an adapter that could not be read is uninspected.
+        # Neither may report success.
         $residueList += 'dns-cleanup-failed'
         $script:Result.residue = @($residueList | Select-Object -Unique)
-        Write-Log -Level ERROR -Message ('{0} adapter(s) could not be repaired; DNS may still point at loopback.' -f $dnsFailures.Count)
+        Write-Log -Level ERROR -Message ('{0} adapter(s) could not be inspected or repaired; DNS may still point at loopback.' -f $dnsFailures.Count)
     }
 
     if ($anyFailed -or $script:Result.residue.Count -gt 0) {
