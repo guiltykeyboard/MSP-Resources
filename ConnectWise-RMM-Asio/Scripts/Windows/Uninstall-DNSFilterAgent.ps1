@@ -23,7 +23,7 @@
         2. HKLM\SOFTWARE\DNSFilter\Agent and HKLM\SOFTWARE\DNSAgent\Agent
         3. the Windows Installer product database through its COM API, which
            still lists a product hidden from Add/Remove Programs
-        4. the agent service and install directory
+        4. the agent service and install directory, in every programs root
       Win32_Product is deliberately not used: querying it makes Windows Installer
       run a consistency check against every installed product.
 
@@ -46,8 +46,8 @@
 
 .PARAMETER RegClean
     Auto (default) passes REGCLEAN=true only for agents at v2.0.1 or newer. True
-    forces it, False disables it. REGCLEAN=true also clears the agent's registry
-    state, which is what you want when re-keying a site.
+    forces it, False disables it and preserves the agent's configuration keys and
+    ProgramData folder.
 
 .PARAMETER ForceCleanup
     Also remove residue (service, directories, registry keys) after a FAILED
@@ -81,7 +81,7 @@
     .\Uninstall-DNSFilterAgent.ps1 -TestOnly
 
 .EXAMPLE
-    # Keep the agent's registry config (REGCLEAN=false)
+    # Keep the agent's registry config for a re-key
     .\Uninstall-DNSFilterAgent.ps1 -RegClean:$false
 
 .EXAMPLE
@@ -94,6 +94,8 @@
     Residue cleanup is deferred until every removal attempt has finished and is
     scoped to the products that were actually removed, so one product's success
     cannot delete another product's files first.
+    Verification asks Add/Remove Programs and the MSI database, never the agent's own
+    configuration key, so a preserved config GUID is not mistaken for an install.
     HKCU tray-icon residue belongs to the logged-on user profile, not SYSTEM, so it
     is reported rather than silently rewritten.
     Exit codes: 0 = ok, 1 = failed/residue, 2 = parameter/prerequisite problem.
@@ -346,26 +348,70 @@ function Get-AgentServices {
     return $found
 }
 
+function Get-ProgramFileRoots {
+    # A 32-bit PowerShell host on 64-bit Windows reports ProgramFiles as
+    # "Program Files (x86)", so the native directory would be missed. ProgramW6432
+    # is the native root even from a 32-bit host; collect every root that exists and
+    # use the same list for discovery and for cleanup.
+    $roots = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramW6432)) { $roots += $env:ProgramW6432 }
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) { $roots += $env:ProgramFiles }
+    if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) { $roots += ${env:ProgramFiles(x86)} }
+    return @($roots | Select-Object -Unique)
+}
+
 function Get-AgentDirectories {
-    # Both programs roots, because the agent installs per-architecture, plus the
-    # two ProgramData locations the current and legacy builds use.
+    # Every programs root that exists, plus the two ProgramData locations the
+    # current and legacy builds use.
     $found = @()
-    $pairs = @(
-        @{ Base = $env:ProgramFiles;          Leaf = 'DNSFilter Agent' },
-        @{ Base = $env:ProgramFiles;          Leaf = 'DNS Agent' },
-        @{ Base = ${env:ProgramFiles(x86)};   Leaf = 'DNSFilter Agent' },
-        @{ Base = ${env:ProgramFiles(x86)};   Leaf = 'DNS Agent' },
-        @{ Base = $env:ProgramData;           Leaf = 'DNSFilter, Inc' },
-        @{ Base = $env:ProgramData;           Leaf = 'DNS Agent' }
-    )
-    foreach ($pair in $pairs) {
-        # A base that does not exist on this host (ProgramFiles(x86) on ARM64, or
-        # any of them off Windows) must not become a Join-Path binding error.
-        if ([string]::IsNullOrWhiteSpace($pair.Base)) { continue }
-        $p = Join-Path -Path $pair.Base -ChildPath $pair.Leaf
-        if (Test-Path -LiteralPath $p) { $found += $p }
+    foreach ($root in (Get-ProgramFileRoots)) {
+        foreach ($leaf in @('DNSFilter Agent', 'DNS Agent')) {
+            $p = Join-Path -Path $root -ChildPath $leaf
+            if (Test-Path -LiteralPath $p) { $found += $p }
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+        foreach ($leaf in @('DNSFilter, Inc', 'DNS Agent')) {
+            $p = Join-Path -Path $env:ProgramData -ChildPath $leaf
+            if (Test-Path -LiteralPath $p) { $found += $p }
+        }
     }
     return @($found | Select-Object -Unique)
+}
+
+function Get-PhysicalResidue {
+    # Services and program-files directories a complete removal should have taken
+    # away. ProgramData configuration is excluded when it was asked to be preserved.
+    param([switch]$PreserveConfig)
+    $items = @()
+    foreach ($svc in (Get-AgentServices)) { $items += ('service:' + $svc.Name) }
+    $configDirs = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+        $configDirs += (Join-Path $env:ProgramData 'DNSFilter, Inc')
+        $configDirs += (Join-Path $env:ProgramData 'DNS Agent')
+    }
+    foreach ($dir in (Get-AgentDirectories)) {
+        if ($PreserveConfig -and ($configDirs -contains $dir)) { continue }
+        $items += ('dir:' + $dir)
+    }
+    return $items
+}
+
+function Test-ProductRegistered {
+    # Registration only: Add/Remove Programs and the Windows Installer database.
+    # The HKLM\SOFTWARE\DNSFilter\Agent GUID is deliberately excluded - it is
+    # configuration, and with -RegClean False it is meant to survive the removal.
+    param([Parameter(Mandatory)][string]$ProductCode)
+    $code = $ProductCode.ToUpper()
+    foreach ($view in @('Registry64', 'Registry32')) {
+        foreach ($entry in (Get-UninstallEntries -View $view)) {
+            if ($entry.ProductCode.ToUpper() -eq $code) { return $true }
+        }
+    }
+    foreach ($product in (Get-MsiProducts)) {
+        if ($product.ProductCode -eq $code) { return $true }
+    }
+    return $false
 }
 
 function Get-AgentRecipe {
@@ -540,18 +586,18 @@ function Get-ResidueTargets {
     $legacy  = [bool]($Agent.Name -match 'Agent' -and $Agent.Name -notmatch 'DNSFilter')
     if (-not $branded -and -not $legacy) { $branded = $true; $legacy = $true }
 
-    $targets = [pscustomobject]@{ Services = @(); Directories = @(); Keys = @() }
+    $targets = [pscustomobject]@{ Services = @(); Directories = @(); ConfigDirectories = @(); Keys = @() }
     if ($branded) {
-        $targets.Services    += 'DNSFilter Agent'
-        if ($env:ProgramFiles) { $targets.Directories += (Join-Path $env:ProgramFiles 'DNSFilter Agent') }
-        if ($env:ProgramData)  { $targets.Directories += (Join-Path $env:ProgramData 'DNSFilter, Inc') }
-        $targets.Keys        += 'SOFTWARE\DNSFilter'
+        $targets.Services += 'DNSFilter Agent'
+        foreach ($root in (Get-ProgramFileRoots)) { $targets.Directories += (Join-Path $root 'DNSFilter Agent') }
+        if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) { $targets.ConfigDirectories += (Join-Path $env:ProgramData 'DNSFilter, Inc') }
+        $targets.Keys += 'SOFTWARE\DNSFilter'
     }
     if ($legacy) {
-        $targets.Services    += 'DNS Agent'
-        if ($env:ProgramFiles) { $targets.Directories += (Join-Path $env:ProgramFiles 'DNS Agent') }
-        if ($env:ProgramData)  { $targets.Directories += (Join-Path $env:ProgramData 'DNS Agent') }
-        $targets.Keys        += 'SOFTWARE\DNSAgent'
+        $targets.Services += 'DNS Agent'
+        foreach ($root in (Get-ProgramFileRoots)) { $targets.Directories += (Join-Path $root 'DNS Agent') }
+        if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) { $targets.ConfigDirectories += (Join-Path $env:ProgramData 'DNS Agent') }
+        $targets.Keys += 'SOFTWARE\DNSAgent'
     }
     return $targets
 }
@@ -567,18 +613,23 @@ function Remove-AgentResidue {
     $removed = @()
     $failed  = @()
 
-    $services = @()
-    $dirs     = @()
-    $keys     = @()
+    $services   = @()
+    $dirs       = @()
+    $configDirs = @()
+    $keys       = @()
     foreach ($agent in $Agents) {
-        $targets  = Get-ResidueTargets -Agent $agent
-        $services += $targets.Services
-        $dirs     += $targets.Directories
-        $keys     += $targets.Keys
+        $targets     = Get-ResidueTargets -Agent $agent
+        $services   += $targets.Services
+        $dirs       += $targets.Directories
+        $configDirs += $targets.ConfigDirectories
+        $keys       += $targets.Keys
     }
-    $services = @($services | Select-Object -Unique)
-    $dirs     = @($dirs | Select-Object -Unique)
-    $keys     = @($keys | Select-Object -Unique)
+    $services   = @($services | Select-Object -Unique)
+    $dirs       = @($dirs | Select-Object -Unique)
+    $configDirs = @($configDirs | Select-Object -Unique)
+    $keys       = @($keys | Select-Object -Unique)
+    # Preserving the configuration means keeping ProgramData too, not just the keys.
+    if (-not $PreserveConfig) { $dirs = @($dirs + $configDirs | Select-Object -Unique) }
 
     foreach ($name in $services) {
         try {
@@ -796,18 +847,27 @@ function Invoke-Removal {
     } elseif ($anyFailed) {
         Write-Log -Level WARN -Message 'Left residue in place because every removal failed. Re-run with -ForceCleanup to remove it anyway.'
     } else {
-        Write-Log -Message 'No product was actually removed (all reports were "not installed"), so residue cleanup was skipped.'
+        # Discovery can be triggered by a surviving service or directory alone, and
+        # cleanup is deliberately skipped when nothing reported as registered. Those
+        # survivors are still residue and must fail the run.
+        Write-Log -Level WARN -Message 'No product was registered, so residue cleanup was skipped; reporting what is still present.'
     }
 
-    # Verify AFTER cleanup, against real registration sources only. Discovery adds
-    # synthetic KnownProductCode candidates whenever a service or directory
-    # survives, and counting those as "still installed" would make a clean endpoint
-    # report removed-with-residue forever.
+    # Whatever cleanup intended to remove, say so if it is still there - this covers
+    # the skipped path and any deletion that silently failed.
+    foreach ($leftover in (Get-PhysicalResidue -PreserveConfig:($RegClean -eq 'False'))) {
+        if ($residueList -notcontains $leftover) {
+            Write-Log -Level WARN -Message ('Residue still present: {0}' -f $leftover)
+            $residueList += $leftover
+        }
+    }
+
+    # Verify AFTER cleanup, against registration only. A retained configuration GUID
+    # (legal under -RegClean False) is not proof that the product is installed.
     $removedCodes = @($removedAgents | ForEach-Object { $_.ProductCode })
     foreach ($agent in $agents) {
-        $real = @(Get-InstalledAgents | Where-Object { $_.ProductCode -eq $agent.ProductCode -and -not $_.Synthetic })
-        if ($real.Count -gt 0) {
-            Write-Log -Level WARN -Message ('{0} still registered after removal (found via {1}).' -f $agent.ProductCode, ($real.Source -join ','))
+        if (Test-ProductRegistered -ProductCode $agent.ProductCode) {
+            Write-Log -Level WARN -Message ('{0} is still registered after removal.' -f $agent.ProductCode)
             $residueList += ('still-registered:' + $agent.ProductCode)
         } elseif ($removedCodes -contains $agent.ProductCode) {
             $removedList += ('product:' + $agent.ProductCode)
