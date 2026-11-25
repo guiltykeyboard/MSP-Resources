@@ -37,8 +37,12 @@
       The agent points adapters at 127.0.0.1. If a removal leaves that behind, the
       endpoint has no working DNS. -DnsCleanup Clean (default) strips loopback
       servers from active adapters and falls back to DHCP when nothing else
-      remains; Report only lists them. A DNS pass that cannot inspect an adapter is
-      a failure, not a silent skip: an uninspected endpoint is not a clean one.
+      remains; Report only lists them.
+      Clean only runs once the agent is actually gone. While a product is still
+      registered or its service still exists, 127.0.0.1 is doing its job, so a
+      failed uninstall downgrades the DNS pass to report-only rather than disabling
+      protection. A DNS pass that cannot inspect an adapter fails the run: an
+      uninspected endpoint is not a clean one.
 
     OUTPUT
       One-line JSON on STDOUT plus an MSI log digest.
@@ -57,7 +61,8 @@
 
 .PARAMETER DnsCleanup
     Clean (default) or Report. Controls whether loopback DNS servers are stripped
-    from adapters after removal.
+    from adapters after removal. Clean is downgraded to Report automatically while
+    any agent product or service remains.
 
 .PARAMETER TestOnly
     Report every agent found, where it was found, its version and the recipe that
@@ -162,6 +167,7 @@ $script:Result = [ordered]@{
     removed     = @()
     residue     = @()
     dns         = @()
+    dnsMode     = $null
     exitCode    = 0
     detail      = $null
 }
@@ -922,7 +928,19 @@ function Invoke-Removal {
     $script:Result.removed = @($removedList | Select-Object -Unique)
     $script:Result.residue = @($residueList | Select-Object -Unique)
 
-    $dnsResults = Repair-LoopbackDns -Mode $DnsCleanup
+    # Removing the agent is what makes its loopback resolver wrong. While an agent is
+    # still registered or its service is still running, 127.0.0.1 is doing its job -
+    # stripping it would disable DNSFilter protection instead of restoring DNS. A
+    # failed uninstall (1618, 1603) must therefore not reach the Clean path.
+    $stillRegistered   = @($agents | Where-Object { Test-ProductRegistered -ProductCode $_.ProductCode })
+    $survivingServices = @(Get-AgentServices)
+    $dnsMode = $DnsCleanup
+    if ($DnsCleanup -eq 'Clean' -and ($stillRegistered.Count -gt 0 -or $survivingServices.Count -gt 0)) {
+        $dnsMode = 'Report'
+        Write-Log -Level WARN -Message ('DNS cleanup downgraded to report-only: {0} product(s) still registered, {1} agent service(s) still present. A running agent needs 127.0.0.1, so changing it here would break protection rather than restore DNS. Re-run once the agent is gone.' -f $stillRegistered.Count, $survivingServices.Count)
+    }
+    $script:Result.dnsMode = $dnsMode
+    $dnsResults = Repair-LoopbackDns -Mode $dnsMode
     $script:Result.dns = @($dnsResults)
 
     $dnsFailures = @($dnsResults | Where-Object { $_.Action -like 'failed*' })
