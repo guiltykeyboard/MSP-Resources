@@ -49,7 +49,8 @@ Three things break in real fleets:
    `@DNSFilter-Site-Token@`, which RMM substitutes when the field exists. Nothing
    else to wire up.
 3. **Run as SYSTEM** with a 64-bit PowerShell host where possible. A 32-bit host
-   still works - detection handles it - but 64-bit is the cleaner signal.
+   still works - detection and the registry scan both handle it - but 64-bit is the
+   cleaner signal.
 4. **Allow the download path** if you filter egress: `downloads.dnsfilter.com` over
    HTTPS/443. A content filter that returns an HTML block page is caught by the MSI
    signature check instead of failing later inside Windows Installer.
@@ -73,6 +74,9 @@ no site.
 # Remove the agent (detects modern and legacy whitelabel builds)
 .\Deploy-DNSFilterAgent.ps1 -Uninstall
 
+# Pre-flight an uninstall: reports what would be removed, removes nothing
+.\Deploy-DNSFilterAgent.ps1 -Uninstall -TestOnly
+
 # Verify the agent answers as a local resolver after install
 .\Deploy-DNSFilterAgent.ps1 -ProbeLocalResolver
 ```
@@ -86,8 +90,8 @@ no site.
 | `-AgentVersion` | *(empty)* | Pin a build, e.g. `3.6.10` -> `DNSFilter-Agent-Setup-x64-3.6.10.msi`. Empty uses the evergreen unversioned package. |
 | `-BaseUrl` | `https://downloads.dnsfilter.com/User_Agent/Windows` | Download root, for a mirror or a test build. |
 | `-Force` | off | Repair/re-key an existing agent (`REINSTALL=ALL REINSTALLMODE=vomus`). |
-| `-Uninstall` | off | Remove by ARP product code. No key required. |
-| `-TestOnly` | off | Report architecture, package URL and current state; download and install nothing. |
+| `-Uninstall` | off | Remove by ARP product code. No key required; combined with `-TestOnly` it reports only. |
+| `-TestOnly` | off | Report architecture, package URL, token state and current state; download, install and uninstall nothing. Checked before every mutating path. |
 | `-ProbeLocalResolver` | off | Resolve `dnsfilter.com` against `127.0.0.1` after install. Informational, never changes the exit code. |
 | `-LogPath` | `%ProgramData%\iTech\Logs\DNSFilter-Agent-<host>.log` | Transcript log. |
 | `-DownloadRetries` | `3` | Attempts before giving up, with backoff between them. |
@@ -97,16 +101,21 @@ no site.
 | Code | Meaning |
 |---|---|
 | `0` | Installed, already present, uninstalled, or pre-flight OK |
-| `1` | Install or verification failed - read the log |
+| `1` | Install, uninstall or verification failed - read the log |
 | `2` | Parameter or prerequisite problem: missing/invalid site key, unknown architecture, 32-bit-only OS, download failure, invalid package |
+
+The JSON summary and the exit code are emitted at a single point after the
+implementation returns, so every completion path - pre-flight, uninstall,
+already-installed, download failure, install failure, verification failure -
+reports and exits the same way. A failed run cannot look green in RMM.
 
 ## States reported in the JSON summary
 
 `install`, `repair`, `skip`, `uninstall`, `preflight` are the actions. `status` is
 one of: `installed`, `installed-reboot`, `already-installed`, `uninstalled`,
-`not-installed`, `preflight-ok`, `missing-token`, `invalid-token`,
-`architecture-unknown`, `unsupported-os`, `download-failed`, `invalid-package`,
-`installed-unverified`, `failed`, `error`.
+`uninstall-failed`, `not-installed`, `preflight-ok`, `missing-token`,
+`invalid-token`, `architecture-unknown`, `unsupported-os`, `download-failed`,
+`invalid-package`, `installed-unverified`, `failed`, `error`.
 
 ```json
 {"script":"Deploy-DNSFilterAgent","commit":"unstamped","computer":"WS-042","when":"2026-11-25T14:02:11.4421-05:00","action":"install","architecture":"arm64","package":"https://downloads.dnsfilter.com/User_Agent/Windows/DNSFilter-Agent-Setup-arm64.msi","tokenState":"parameter","status":"installed","msiExit":0,"product":"DNSFilter Agent","version":"3.6.10","service":"DNSFilter Agent (Running)","resolverProbe":null,"exitCode":0,"detail":"Success"}
@@ -116,19 +125,25 @@ one of: `installed`, `installed-reboot`, `already-installed`, `uninstalled`,
 
 1. Refuses a 32-bit-only OS; resolves x64 vs ARM64.
 2. Resolves the site key (parameter, then environment), validates its shape, and
-   logs only a masked hint (`abcd...yz`).
-3. Builds the package URL; reports any existing agent found in Add/Remove Programs.
-4. `-Uninstall` removes it and exits. `-TestOnly` stops here. An existing agent
-   without `-Force` exits 0 as `already-installed`.
-5. Creates `%TEMP%\DNSFilterAgent_<8 hex>`, downloads with TLS 1.2 and retries,
+   logs only a masked hint (`abcd...yz`). `-Uninstall` does not need it, so an
+   uninstall pre-flight is never blocked by an empty field.
+3. Builds the package URL; reads Add/Remove Programs for an existing agent through
+   **both** registry views (`Registry64` then `Registry32`), so a 32-bit PowerShell
+   host still sees a native x64/ARM64 install.
+4. **`-TestOnly` stops here** - before either mutating path. With `-Uninstall` it
+   reports the product code that would be removed and removes nothing.
+5. `-Uninstall` removes by product code (`msiexec /x`) and exits.
+6. An existing agent without `-Force` exits 0 as `already-installed`.
+7. Creates `%TEMP%\DNSFilterAgent_<8 hex>`, downloads with TLS 1.2 and retries,
    verifies the OLE compound-file signature (an HTML block page is not an MSI),
    logs the SHA256.
-6. `msiexec /i "<msi>" /qn /norestart /l*v "<log>" NKEY="<key>"`, exit codes mapped
+8. `msiexec /i "<msi>" /qn /norestart /l*v "<log>" NKEY="<key>"`, exit codes mapped
    (`3010`/`1641` treated as success-with-reboot, `1603`/`1618`/`1625`/`1633`/`1638`/
    `1639` each explained in the log).
-7. Verifies the product in Add/Remove Programs or the agent service is present - if
+9. Verifies the product in Add/Remove Programs or the agent service is present - if
    msiexec said success but neither exists, it exits 1 rather than reporting green.
-8. `finally`: copy the msiexec log to the logs folder, delete the staging folder.
+10. `finally`: copy the msiexec log to the logs folder, delete the staging folder.
+11. Emit the JSON summary and exit with the recorded code.
 
 ## Troubleshooting
 
@@ -142,12 +157,16 @@ one of: `installed`, `installed-reboot`, `already-installed`, `uninstalled`,
 | msiexec `1625` | Blocked by AppLocker or Software Restriction Policies. |
 | `installed-unverified`, exit 1 | msiexec returned success but no product or service appeared. The install did not take; check the log. |
 | Agent installed with the wrong site key | `-Force` with the correct `-SiteToken` to re-key. |
+| `-Uninstall` says nothing is installed but Programs and Features shows an agent | That was the 32-bit registry redirection bug; the script now reads both views. Re-run on the current script. |
 
 ## Notes
 
 - Detects both the modern **DNSFilter Agent** and the legacy whitelabel
   **DNS Agent** in Add/Remove Programs, and matches the service by binary path
   because service names differ between builds.
+- Add/Remove Programs is read with `Microsoft.Win32.RegistryKey::OpenBaseKey` for
+  `Registry64` and `Registry32` rather than the `HKLM:\SOFTWARE` provider path,
+  which a 32-bit host redirects to `WOW6432Node`.
 - The msiexec log is kept at `%ProgramData%\iTech\Logs\DNSFilter-msiexec-<host>.log`;
   change `-LogPath` if you keep RMM logs elsewhere.
 - `-AgentVersion` pins a build for change control; leave it empty to always take
