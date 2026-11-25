@@ -46,7 +46,10 @@
       Anything outside loopback is matched EXACTLY, so a site's real resolver in
       172.16.0.0/12 is never removed. After changing an adapter the value is read
       back; if the dead address survived, the adapter is reported as failed rather
-      than repaired.
+      than repaired. Failures are reported by kind - failed:inspect when an adapter
+      could not be read, failed:set when the change threw, and failed:still-present
+      when the dead address survived the change. A set or still-present failure
+      always fails the run.
 
       A machine with no agent left at all is still worth running the script on: that
       is the broken endpoint, and the DNS repair runs there too.
@@ -765,6 +768,12 @@ function Test-ResidueDnsServer {
 function Repair-LoopbackDns {
     # The agent points adapters at a dead local address. Left behind, that adapter
     # has no working DNS - the endpoint drops off the network.
+    #
+    # Action values, and what each means to the caller:
+    #   reported / loopback-removed / reset-to-dhcp  - fine
+    #   failed:inspect:<why>   - an adapter could not be read (reporting gap)
+    #   failed:set:<why>       - the change threw (failed repair)
+    #   failed:still-present:<addr> - the dead address survived the change
     param([ValidateSet('Clean', 'Report')][string]$Mode)
     $results = @()
     $adapters = @()
@@ -782,7 +791,7 @@ function Repair-LoopbackDns {
             Before  = ''
             After   = ''
             Removed = ''
-            Action  = ('failed:' + $message)
+            Action  = ('failed:inspect:' + $message)
         })
     }
     foreach ($adapter in $adapters) {
@@ -798,7 +807,7 @@ function Repair-LoopbackDns {
                     Before  = '(unreadable)'
                     After   = ''
                     Removed = ''
-                    Action  = ('failed:' + $message)
+                    Action  = ('failed:inspect:' + $message)
                 }
             }
             continue
@@ -820,7 +829,10 @@ function Repair-LoopbackDns {
                     $action = 'loopback-removed'
                 }
             } catch {
-                $action = 'failed:' + $_.Exception.Message
+                # A setter that throws is a failed repair, not an unreadable adapter.
+                # The two are reported apart so the repair-only path can fail on one
+                # and merely warn on the other.
+                $action = 'failed:set:' + $_.Exception.Message
             }
         }
         $after = @()
@@ -879,12 +891,13 @@ function Invoke-Removal {
             $dnsResults = @(Repair-LoopbackDns -Mode $repairMode)
             $script:Result.dns = @($dnsResults)
 
-            # Two very different failures. Residue found but not cleared is a broken
-            # endpoint and must go red. An adapter that could not be read on a machine
-            # with no agent and no residue is a reporting gap, not a failed removal, so
-            # it warns without failing a fleet-wide task that had nothing to do here.
-            $stillBroken = @($dnsResults | Where-Object { $_.Action -like 'failed:still-present*' })
-            $uninspected = @($dnsResults | Where-Object { $_.Action -like 'failed:*' -and $_.Action -notlike 'failed:still-present*' })
+            # Three different outcomes. A failed set or a value that survived the set
+            # is a broken endpoint and must go red. An adapter that could not be read
+            # on a machine with no agent and no residue is a reporting gap, not a
+            # failed removal, so it warns without failing a fleet-wide task that had
+            # nothing to do here.
+            $stillBroken = @($dnsResults | Where-Object { $_.Action -like 'failed:set:*' -or $_.Action -like 'failed:still-present:*' })
+            $uninspected = @($dnsResults | Where-Object { $_.Action -like 'failed:inspect:*' })
             $repaired    = @($dnsResults | Where-Object { $_.Action -eq 'loopback-removed' -or $_.Action -eq 'reset-to-dhcp' })
 
             if ($repaired.Count -gt 0) {
@@ -897,7 +910,7 @@ function Invoke-Removal {
                 $script:Result.status = 'not-installed-dns-failed'
                 $script:Result.detail = ('{0} adapter(s) still broken' -f $stillBroken.Count)
                 $script:ExitCode = 1
-                Write-Log -Level ERROR -Message ('{0} adapter(s) still point at the agent address after the change. Fix them manually; re-run with -DnsCleanup Report to inspect without changing anything.' -f $stillBroken.Count)
+                Write-Log -Level ERROR -Message ('{0} adapter(s) still point at the agent address after the repair attempt. Fix them manually; re-run with -DnsCleanup Report to inspect without changing anything.' -f $stillBroken.Count)
             }
             if ($uninspected.Count -gt 0 -and $stillBroken.Count -eq 0 -and $repaired.Count -eq 0) {
                 Write-Log -Level WARN -Message ('{0} adapter(s) could not be inspected; no agent is installed, so nothing was removed and nothing is presumed broken. Re-run with -DnsCleanup Report for detail.' -f $uninspected.Count)
