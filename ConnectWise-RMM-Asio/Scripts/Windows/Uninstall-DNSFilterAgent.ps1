@@ -214,8 +214,12 @@ function Get-MsiProducts {
             if (-not $code) { continue }
             $name = ''
             $version = ''
-            try { $name = [string]$installer.GetType().InvokeMember('ProductInfo', 'InvokeMethod', $null, $installer, @($code, 'ProductName')) } catch { }
-            try { $version = [string]$installer.GetType().InvokeMember('ProductInfo', 'InvokeMethod', $null, $installer, @($code, 'VersionString')) } catch { }
+            # ProductInfo is a read-only indexed property on the Installer object,
+            # not a method: it must be read with GetProperty and index arguments, or
+            # the call throws, the exception is swallowed, and this whole discovery
+            # source silently returns nothing.
+            try { $name = [string]$installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($code, 'ProductName')) } catch { }
+            try { $version = [string]$installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($code, 'VersionString')) } catch { }
             if (-not $name) { continue }
             $found += [pscustomobject]@{
                 ProductCode = ([string]$code).ToUpper()
@@ -398,6 +402,13 @@ function Get-InstalledAgents {
         $matched += $c
     }
 
+    # Real discovery sources are not synthetic; the known-code fallback below is.
+    foreach ($m in $matched) {
+        if (-not ($m.PSObject.Properties.Name -contains 'Synthetic')) {
+            $m | Add-Member -NotePropertyName Synthetic -NotePropertyValue $false -Force
+        }
+    }
+
     # Anything visible on disk or in services but not yet identified gets the known codes.
     $seenCodes = @($matched | ForEach-Object { $_.ProductCode.ToUpper() })
     $hasSomething = (Get-AgentServices).Count -gt 0 -or (Get-AgentDirectories).Count -gt 0
@@ -411,6 +422,7 @@ function Get-InstalledAgents {
                     Publisher   = 'DNSFilter'
                     View        = ''
                     Source      = 'KnownProductCode'
+                    Synthetic   = $true
                 }
             }
         }
@@ -426,6 +438,8 @@ function Get-InstalledAgents {
             if (-not $existing.Version -and $m.Version) { $existing.Version = $m.Version }
             if (-not $existing.Name -and $m.Name) { $existing.Name = $m.Name }
             if ($existing.Source -notlike '*MsiDatabase*') { $existing.Source = $existing.Source + '+' + $m.Source }
+            # A real source beats the fallback: the product is genuinely registered.
+            if ($m.Synthetic -eq $false) { $existing.Synthetic = $false }
         }
     }
 
@@ -438,6 +452,7 @@ function Get-InstalledAgents {
             Version     = $a.Version
             Source      = $a.Source
             View        = $a.View
+            Synthetic   = [bool]$a.Synthetic
             Recipe      = Get-AgentRecipe -Version $a.Version
         }
     }
@@ -687,7 +702,7 @@ function Invoke-Removal {
 
     $agents = Get-InstalledAgents
     $script:Result.agents = @($agents | ForEach-Object {
-        [ordered]@{ product = $_.Name; code = $_.ProductCode; version = $_.Version; foundBy = $_.Source; recipe = $_.Recipe }
+        [ordered]@{ product = $_.Name; code = $_.ProductCode; version = $_.Version; foundBy = $_.Source; synthetic = $_.Synthetic; recipe = $_.Recipe }
     })
 
     if ($agents.Count -eq 0) {
@@ -699,7 +714,7 @@ function Invoke-Removal {
     }
 
     foreach ($a in $agents) {
-        Write-Log -Message ('Found {0} {1} code={2} via {3} -> recipe {4}' -f $a.Name, $a.Version, $a.ProductCode, $a.Source, $a.Recipe)
+        Write-Log -Message ('Found {0} {1} code={2} via {3} (synthetic={4}) -> recipe {5}' -f $a.Name, $a.Version, $a.ProductCode, $a.Source, $a.Synthetic, $a.Recipe)
     }
 
     if ($TestOnly) {
@@ -750,15 +765,6 @@ function Invoke-Removal {
             $removedAgents += $agent
         }
 
-        # Verify: is the product still registered anywhere we can see?
-        $stillThere = @(Get-InstalledAgents | Where-Object { $_.ProductCode -eq $agent.ProductCode })
-        if ($stillThere.Count -gt 0 -and $outcome.Ok) {
-            Write-Log -Level WARN -Message ('{0} still appears after removal (found via {1}).' -f $agent.ProductCode, ($stillThere.Source -join ','))
-            $residueList += ('still-registered:' + $agent.ProductCode)
-        } else {
-            $removedList += ('product:' + $agent.ProductCode)
-        }
-
         if (Test-Path -LiteralPath $msiLog) {
             try {
                 $logDir = Split-Path -Parent $LogPath
@@ -791,6 +797,21 @@ function Invoke-Removal {
         Write-Log -Level WARN -Message 'Left residue in place because every removal failed. Re-run with -ForceCleanup to remove it anyway.'
     } else {
         Write-Log -Message 'No product was actually removed (all reports were "not installed"), so residue cleanup was skipped.'
+    }
+
+    # Verify AFTER cleanup, against real registration sources only. Discovery adds
+    # synthetic KnownProductCode candidates whenever a service or directory
+    # survives, and counting those as "still installed" would make a clean endpoint
+    # report removed-with-residue forever.
+    $removedCodes = @($removedAgents | ForEach-Object { $_.ProductCode })
+    foreach ($agent in $agents) {
+        $real = @(Get-InstalledAgents | Where-Object { $_.ProductCode -eq $agent.ProductCode -and -not $_.Synthetic })
+        if ($real.Count -gt 0) {
+            Write-Log -Level WARN -Message ('{0} still registered after removal (found via {1}).' -f $agent.ProductCode, ($real.Source -join ','))
+            $residueList += ('still-registered:' + $agent.ProductCode)
+        } elseif ($removedCodes -contains $agent.ProductCode) {
+            $removedList += ('product:' + $agent.ProductCode)
+        }
     }
 
     # Leftover HKCU tray icons belong to the logged-on user, not to SYSTEM.
